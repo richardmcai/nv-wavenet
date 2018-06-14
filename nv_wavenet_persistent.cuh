@@ -502,20 +502,20 @@ __global__ void nv_wavenet_persistent(nv_wavenet_params<T_weight, T_data> params
 
 template <typename T_weight, typename T_data, int R, int S, int A, int BATCH_UNROLL>
 bool launch_persistent(nv_wavenet_params<T_weight, T_data> params, cudaStream_t stream) {
-    int prev_blocks = params.num_layers;
-    int cur_blocks = params.num_layers;
+    int prev_blocks = params.num_layers; // 1 block for each convolution over previous
+    int cur_blocks = params.num_layers; // 1 block for each convolution over current
     if (S<4*R) assert (S%R==0); else assert(S%4*R==0);
     assert(A>=4*R);
-    const int S_TILE = S < 4*R ? S : 4*R;
-    int s_tiles = S / S_TILE;
-    int skip_blocks = params.num_layers * s_tiles;
-    int Zs_blocks = (A/(4*R)) * (S/R);
-    int Za_blocks = (A/(4*R)) * (A/R);
-    int softmax_blocks = params.batch_size;
-    dim3 grid(prev_blocks + cur_blocks + skip_blocks + Zs_blocks + Za_blocks + softmax_blocks);
+    const int S_TILE = S < 4*R ? S : 4*R; // S_TILE = min(S, 4R)
+    int s_tiles = S / S_TILE; // >= 1
+    int skip_blocks = params.num_layers * s_tiles; // 1 block for each skip convolution if S < 4R, else spread across multiple blocks
+    int Zs_blocks = (A/(4*R)) * (S/R); // FC Relu from S to A
+    int Za_blocks = (A/(4*R)) * (A/R); // FC Relu from A to A
+    int softmax_blocks = params.batch_size; // 1 softmax for each batch
+    dim3 grid(prev_blocks + cur_blocks + skip_blocks + Zs_blocks + Za_blocks + softmax_blocks); // create 1d grid of size total blocks
     dim3 block(4*R);
-    if (S > 4*R) block.x = S;
-    int occ = getOccupancy(0, block.x*block.y*block.z,(void*)nv_wavenet_persistent<T_weight, T_data, R, S, A, BATCH_UNROLL>);
+    if (S > 4*R) block.x = S; // each block has max(4R, S) threads
+    int occ = getOccupancy(0, block.x*block.y*block.z,(void*)nv_wavenet_persistent<T_weight, T_data, R, S, A, BATCH_UNROLL>); // calculate occupancy
     printf("%d blocks, %d blocks per SM\n", grid.x, occ);
     assert(occ>0);
     gpuErrChk(cudaMemset((void*)params.hSample,0,params.num_layers*params.batch_size*sizeof(int)));

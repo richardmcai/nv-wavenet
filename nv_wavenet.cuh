@@ -89,9 +89,9 @@ __device__ void nv_wavenet_prev(int sample, int thread_id, int num_layers, int m
 
     __shared__ T_data xtmd_sh[2][BATCH_UNROLL][R];
 
-    if (thread_id < 2*R) {
+    if (thread_id < 2*R) { // first 2R threads load the cached xt values (dim-R) into shared memory
         int row = thread_id;
-        int ping_pong = 0;
+        int ping_pong = 0; // have two xtmd so can keep loading into shared memory while other threads compute convolution
         int dilation = 1;
         for (int layer=0; layer<num_layers; layer++) {
             int sample_offset = (sample - dilation) % (maxDilation+1);
@@ -108,13 +108,13 @@ __device__ void nv_wavenet_prev(int sample, int thread_id, int num_layers, int m
             namedBarrierSync(3,4*R);
         }
     }
-    else if (thread_id< 4*R) {
+    else if (thread_id< 4*R) { // next 2R threads compute the 2R-channel convolution
         int ping_pong = 0;
         int row = thread_id - 2*R;
         for (int layer=0; layer<num_layers; layer++) {
             loadWeights<2*R,R>(weights,Wprev,layer,row);
-            namedBarrierSync(3,4*R);
-            GEMM<R,4,BATCH_UNROLL>(weights,xtmd_sh[ping_pong],accum);
+            namedBarrierSync(3,4*R); // wait for first 2R threads to finish loading cached xt into shared memory
+            GEMM<R,4,BATCH_UNROLL>(weights,xtmd_sh[ping_pong],accum); // compute convolution, save to a_prev (dim 2R)
             for (int b=0; b<BATCH_UNROLL; b++) { 
                 a_prev[layer*batch_size*2*R + (batch_offset+b)*2*R + row] = accum[b];
             }
@@ -131,41 +131,41 @@ __device__ void nv_wavenet_cur(int sample, int row, int num_layers, int batch_of
     T_data accum[BATCH_UNROLL];
     T_data bias;
     namedBarrierSync(1,3*R);
-    for (int layer=0; layer<num_layers; layer++) {
+    for (int layer=0; layer<num_layers; layer++) { // compute the gated dilated convolution for each layer (concatenated, 1x2R)
         loadWeights<2*R,R>(weights,Wcur,layer,row);
         bias = B[layer*2*R+row];
         T_data conditioning[BATCH_UNROLL];
         T_data a_prev_reg[BATCH_UNROLL];
-        for (int b=0; b<BATCH_UNROLL; b++) {
+        for (int b=0; b<BATCH_UNROLL; b++) { // load the conditioning vectors and previous dilated convolutions
             conditioning[b] = L[sample*num_layers*batch_size*2*R + layer*batch_size*2*R + (batch_offset+b)*2*R + row];
             a_prev_reg[b]= a_prev[layer*batch_size*2*R + (batch_offset+b)*2*R + row];
         }
-        __syncthreads();
-        GEMM<R,4,BATCH_UNROLL>(weights,xt_sh,accum);
-        for (int b=0; b<BATCH_UNROLL; b++) { 
+        __syncthreads(); // wait for res to finish computing layer input, stored in xt_sh
+        GEMM<R,4,BATCH_UNROLL>(weights,xt_sh,accum); // compute the partial 2x1 dilated convolution on the current input, store in accum
+        for (int b=0; b<BATCH_UNROLL; b++) { // compute full dilated convolution over current and previous, apply gate and filter, store in a_cur_sh
             accum[b] += a_prev_reg[b];
             accum[b] += bias; 
             accum[b] += conditioning[b];
             a_cur_sh[b][row] = (row < R) ? _tanh(accum[b]) : sigmoid(accum[b]);
         }
-        namedBarrierSync(1,3*R);
+        namedBarrierSync(1,3*R); // wait for threads to finish computing each and every element of gated dilated convolution
     }
 }
 
 template <typename T_weight, typename T_data, int R, int S, int BATCH_UNROLL, bool DUAL_BLOCK=false>
 __device__ void nv_wavenet_pointwise(int sample, int row, int num_layers, int batch_offset, int batch_size, T_data* xtmd, T_data xt_sh[BATCH_UNROLL][R], T_data a_cur_sh[BATCH_UNROLL][2*R], T_data h_sh[BATCH_UNROLL][R], T_data* h, volatile int* hSample) {
-    namedBarrierSync(1,3*R);
-    for (int layer=0; layer<num_layers; layer++) {
-        __syncthreads(); 
-        namedBarrierSync(1,3*R);
-        for (int b=0; b<BATCH_UNROLL; b++) {
+    namedBarrierSync(1,3*R); // wait for cur block to initialize accumulation variables
+    for (int layer=0; layer<num_layers; layer++) { // compute the hidden state for each layer
+        __syncthreads(); // wait for res to finish computing layer input
+        namedBarrierSync(1,3*R); // wait for cur to finish computing gated dilated convolution (stored in a_cur_sh as concatenated 2r vector)
+        for (int b=0; b<BATCH_UNROLL; b++) { // compute the hidden state by multiplication of gate and filter outputs
             T_data val_lo = a_cur_sh[b][row];
             T_data val_hi = a_cur_sh[b][row + R];
             T_data val = val_lo * val_hi;
             h_sh[b][row] = val;
             if (DUAL_BLOCK) h[layer*batch_size*R + (batch_offset+b)*R + row] = val;
         }
-        if (DUAL_BLOCK) {
+        if (DUAL_BLOCK) { // wait for threads to finish computing each and every element of hidden state
             namedBarrierSync(2,2*R);
             __threadfence();
             if (row < BATCH_UNROLL) {
@@ -186,18 +186,18 @@ __device__ void nv_wavenet_res(int sample, int row, int num_layers, int maxDilat
     T_data accum[BATCH_UNROLL];
 
     for (int layer=0; layer<num_layers; layer++) {
-        __syncthreads();
+        __syncthreads(); // wait for threads on the previous layer to finish computing each and every element of next layer input
         loadWeights<R,R>(weights,Wres,layer,row);
-        namedBarrierSync(2,DUAL_BLOCK ? 2*R : 2*R+S);
+        namedBarrierSync(2,DUAL_BLOCK ? 2*R : 2*R+S); // wait for pointwise to finish computing the hidden state
         bias = Bres[layer*R+row];
-        GEMM<R,2,BATCH_UNROLL>(weights,h_sh,accum);
+        GEMM<R,2,BATCH_UNROLL>(weights,h_sh,accum); // compute the 1x1 residual convolution over the hidden state
         T_data* Xt = xt + (sample%(maxDilation+1))*(num_layers+1)*R*batch_size;
-        for (int b=0; b<BATCH_UNROLL; b++) { 
+        for (int b=0; b<BATCH_UNROLL; b++) { // compute the input to the next layer, store in xt_sh
             accum[b] += bias; 
             accum[b] += xt_sh[b][row];
             xt_sh[b][row] = accum[b];
-            Xt[(layer+1)*batch_size*R + (batch_offset+b)*R + row] = accum[b];
-            if (dumpActivations) xtOut[layer*batch_size*R + (batch_offset+b)*R + row] = accum[b];
+            Xt[(layer+1)*batch_size*R + (batch_offset+b)*R + row] = accum[b]; // cache the computed input for prev
+            if (dumpActivations) xtOut[layer*batch_size*R + (batch_offset+b)*R + row] = accum[b]; // debugging
         }
     }
 }

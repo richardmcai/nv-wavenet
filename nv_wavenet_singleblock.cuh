@@ -51,14 +51,14 @@ __device__ void nv_wavenet_singleBlock_skip(int row, int num_layers, int batch_o
         __syncthreads();
         loadWeights<S,R>(weights,Wskip,layer,row);
         T_data bias = Bskip[layer*S + row];
-        namedBarrierSync(2,2*R+S);
-        GEMM<R,2,BATCH_UNROLL>(weights,h_sh,accum);
-        for (int b=0; b<BATCH_UNROLL; b++) { 
+        namedBarrierSync(2,2*R+S); // wait for pointwise to finish computing hidden state, load from h_sh
+        GEMM<R,2,BATCH_UNROLL>(weights,h_sh,accum); // compute 1x1 skip convolution over the hidden state
+        for (int b=0; b<BATCH_UNROLL; b++) { // add bias and store result in shared memory
             accum[b] += bias;
             T_data val = accum[b] + skip_accum_last[b];
             skip_accum_last[b] += accum[b];
             skip_out_sh[b][row] = val;
-            if (dumpActivations) skip_out[layer*batch_size*S + (batch_offset+b)*S + row] = val;
+            if (dumpActivations) skip_out[layer*batch_size*S + (batch_offset+b)*S + row] = val; // debugging
         }
     }
 }
@@ -67,7 +67,7 @@ template <typename T_weight, typename T_data, int R, int S, int A, int BATCH_UNR
 __global__ void nv_wavenet_singleBlock_8R(nv_wavenet_params<T_weight, T_data> params) {
 
 
-    int batch_offset = blockIdx.x * BATCH_UNROLL;
+    int batch_offset = blockIdx.x * BATCH_UNROLL; // batch unroll is num of batches per block, from 1 to 4
 
     const int pool_size = BATCH_UNROLL*(R + S + 2*A);
 
@@ -86,7 +86,7 @@ __global__ void nv_wavenet_singleBlock_8R(nv_wavenet_params<T_weight, T_data> pa
     for (int sample = 0; sample < params.num_samples; sample++) {
 
         // Embedding
-        if (threadIdx.x < R) {
+        if (threadIdx.x < R) { // first R threads compute undilated causal convolution as a learned embedding, generate input to first hidden layer dim R
             int row = threadIdx.x;
             int yPrev[BATCH_UNROLL];
             int yCur[BATCH_UNROLL];
@@ -103,7 +103,7 @@ __global__ void nv_wavenet_singleBlock_8R(nv_wavenet_params<T_weight, T_data> pa
             }
         }
 
-        __syncthreads();
+        __syncthreads(); // wait for threads to finish embedding
 
         // Calculate prev for first sample, remaining samples are pipelined against final layers below
         if (threadIdx.x < 4*R && sample == 0) {
@@ -111,25 +111,25 @@ __global__ void nv_wavenet_singleBlock_8R(nv_wavenet_params<T_weight, T_data> pa
             nv_wavenet_prev<T_weight, T_data, R, BATCH_UNROLL>(sample, row, params.num_layers, params.maxDilation, batch_offset, params.batch_size, params.Wprev, params.L, params.xt, params.a_prev, params.dumpActivations);
         }
 
-        __syncthreads();
+        __syncthreads(); // wait for initialization of previous values to finish
 
-        if (threadIdx.x < 2*R) {
+        if (threadIdx.x < 2*R) { // first 2R threads compute the gated dilated convolution, a concatenated vector of dim 2R
             int row = threadIdx.x;
             nv_wavenet_cur<T_weight, T_data, R, BATCH_UNROLL>(sample, row, params.num_layers, batch_offset, params.batch_size, params.Wcur, params.B, params.L, xt_sh, a_cur_sh, params.a_prev);
         }
-        else if (threadIdx.x < 3*R) {
+        else if (threadIdx.x < 3*R) { // next R threads compute the hidden state (dim R) from the gated diluted convolution
             int row = threadIdx.x - 2*R;
             nv_wavenet_pointwise<T_weight, T_data, R, S, BATCH_UNROLL>(sample, row, params.num_layers, batch_offset, params.batch_size, params.xtmd, xt_sh, a_cur_sh, h_sh, NULL, NULL);
         }
-        else if (threadIdx.x < 4*R) {
+        else if (threadIdx.x < 4*R) { // next R threads compute the residual convolution, input to next layer (dim R)
             int row = threadIdx.x - 3*R;
             nv_wavenet_res<T_weight, T_data, R, S, BATCH_UNROLL>(sample, row, params.num_layers, params.maxDilation, batch_offset, params.batch_size, params.Wres, params.Bres, h_sh, xt_sh, params.xt, params.xtOut, params.dumpActivations);
         }
-        else if (threadIdx.x < 4*R+S) {
+        else if (threadIdx.x < 4*R+S) { // next S threads compute the skip convolution, accumulate to skip_out_sh (dim S)
             int row = threadIdx.x - 4*R;
             nv_wavenet_singleBlock_skip<T_weight, T_data, R, S, BATCH_UNROLL>(row, params.num_layers, batch_offset, params.batch_size, params.Wskip, params.Bskip, h_sh, skip_out_sh, params.skip_out, params.dumpActivations);
         }
-        else {
+        else { // remaining threads wait
             for (int layer=0; layer<params.num_layers; layer++) {
                 __syncthreads();
             }
@@ -163,7 +163,7 @@ __global__ void nv_wavenet_singleBlock_8R(nv_wavenet_params<T_weight, T_data> pa
         //__shared__ T_data out_sh[BATCH_UNROLL][A];
         T_data (*out_sh)[A] = (T_data (*)[A])(shared_pool + BATCH_UNROLL*(R+S+A));
 
-        if (threadIdx.x < M) {
+        if (threadIdx.x < M) { // First M threads compute inference
             // SkipOut: AxS 
             for (int tile_m = 0; tile_m < A/M; tile_m++) {
                 T_data bias = params.BskipOut[tile_m*M+row];
@@ -171,7 +171,7 @@ __global__ void nv_wavenet_singleBlock_8R(nv_wavenet_params<T_weight, T_data> pa
                 for (int b=0; b<BATCH_UNROLL; b++) {
                     split_accum[b] = 0.f; 
                 }
-                for (int tile_k = 0; tile_k < S/R; tile_k++) {
+                for (int tile_k = 0; tile_k < S/R; tile_k++) { // 1x1 convolution from S channels to A channels
                     loadWeights<M,R>(weights, params.WskipOut + tile_m*M,  tile_k, threadIdx.x, A);
                     T_data activations[BATCH_UNROLL][R];
                     for (int b=0; b<BATCH_UNROLL; b++) {
@@ -184,7 +184,7 @@ __global__ void nv_wavenet_singleBlock_8R(nv_wavenet_params<T_weight, T_data> pa
                         split_accum[b] += accum[b];
                     }
                 }
-                for (int b=0; b<BATCH_UNROLL; b++) {
+                for (int b=0; b<BATCH_UNROLL; b++) { // relu
                     int finalLayer = S/R - 1;
                     split_accum[b] += bias;
                     skip_out_final_sh[b][tile_m*M + row] = split_accum[b] < zero ? zero : split_accum[b]; // relu
@@ -192,7 +192,7 @@ __global__ void nv_wavenet_singleBlock_8R(nv_wavenet_params<T_weight, T_data> pa
                 }
             }
 
-            namedBarrierSync(1,M);
+            namedBarrierSync(1,M); // wait for skipout to finish
 
 
             // Out: AxA
@@ -223,18 +223,18 @@ __global__ void nv_wavenet_singleBlock_8R(nv_wavenet_params<T_weight, T_data> pa
                 }
             }
 
-            namedBarrierSync(1,M);
+            namedBarrierSync(1,M); // wait for out to finish
 
             //__shared__ T_data p_sh[BATCH_UNROLL][A];
             T_data (*p_sh)[A] = skip_out_final_sh;
 
             __shared__ int yOut_sh[BATCH_UNROLL];
-            softmax_select<T_data, M, A,BATCH_UNROLL>(0,BATCH_UNROLL, (T_data*)out_sh, params.dumpActivations ? (T_data*)p_sh : NULL, params.outputSelectors + sample*params.batch_size + batch_offset, yOut_sh, 1, M);
+            softmax_select<T_data, M, A,BATCH_UNROLL>(0,BATCH_UNROLL, (T_data*)out_sh, params.dumpActivations ? (T_data*)p_sh : NULL, params.outputSelectors + sample*params.batch_size + batch_offset, yOut_sh, 1, M); // sample from softmax distribution
 
-            namedBarrierSync(1,M);
+            namedBarrierSync(1,M); // wait for sampling to finish
 
             for (int u=0; u<BATCH_UNROLL; u++) {
-                if (params.dumpActivations) {
+                if (params.dumpActivations) { // debug
                     for (int i=threadIdx.x; i<A; i += M) {
                         params.p[(batch_offset+u)*A + i] = p_sh[u][i];
                     }
@@ -248,7 +248,7 @@ __global__ void nv_wavenet_singleBlock_8R(nv_wavenet_params<T_weight, T_data> pa
                 }
             }
         }
-        else if (threadIdx.x < A+4*R && sample+1<params.num_samples) {
+        else if (threadIdx.x < A+4*R && sample+1<params.num_samples) { // next A threads compute previous dilated convolutions
             // Precompute prev for next sample
             int row = threadIdx.x-M;
             nv_wavenet_prev<T_weight, T_data, R, BATCH_UNROLL>(sample+1, row, params.num_layers, params.maxDilation, batch_offset, params.batch_size, params.Wprev, params.L, params.xt, params.a_prev, params.dumpActivations);
