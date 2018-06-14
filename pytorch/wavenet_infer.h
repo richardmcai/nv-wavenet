@@ -48,7 +48,8 @@ void wavenet_infer(int sample_count,
                    int use_embed_tanh,
                    float* cond_input,
                    int implementation,
-                   int* samples);
+                   int* samples,
+                   bool blocking);
 
 // --------------------------------------------------------
 // For checking the number of channels match current build

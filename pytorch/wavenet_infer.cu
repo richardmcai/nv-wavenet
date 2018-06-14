@@ -99,6 +99,20 @@ void infer(std::shared_ptr<MyWaveNet> wavenet,
     return;
 }
 
+void infer_async(std::shared_ptr<MyWaveNet> wavenet,
+		   float* input_features,
+           int* samples,
+           int sample_count,
+           int batch_size) {
+    Matrix outputSelectors(batch_size, sample_count);
+    outputSelectors.randomize(0.5,1.0);
+    wavenet->setInputs(input_features, outputSelectors.data());
+
+    int batch_size_per_block = ((batch_size % 4) == 0) ? 4 : ((batch_size % 2) == 0) ? 2 : 1;
+    assert(wavenet->run(sample_count, batch_size, samples, batch_size_per_block, true));
+    return;
+}
+
 // ------------------------------------------------
 // C-compatible function for wrapper
 // ------------------------------------------------
@@ -120,7 +134,8 @@ void wavenet_infer(int sample_count,
                    int use_embed_tanh,
                    float* cond_input,
                    int implementation,
-                   int* samples) {
+                   int* samples,
+                   bool blocking) {
 		std::shared_ptr<MyWaveNet> wavenet = make_wavenet(sample_count,
                                                          batch_size,
                                                          embedding_prev,
@@ -139,8 +154,12 @@ void wavenet_infer(int sample_count,
                                                          use_embed_tanh,
                                                          implementation
                                                          );
-		assert(samples);
-		infer(wavenet, cond_input, samples, sample_count, batch_size);
+        assert(samples);
+        if (blocking) {
+            infer(wavenet, cond_input, samples, sample_count, batch_size);
+        } else {
+            infer_async(wavenet, cond_input, samples, sample_count, batch_size);
+        }
 		return;
 }	
 
