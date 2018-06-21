@@ -26,7 +26,6 @@
 # *****************************************************************************
 import torch
 import nv_wavenet_ext
-from threading import Thread
 
 def interleave_lists(a, b, c, d, e, f, g):
     return [x for t in zip(a, b, c, d, e, f, g) for x in t] 
@@ -52,18 +51,6 @@ def column_major(x):
 def enum(**enums):
     return type('Enum', (), enums)
 Impl = enum(AUTO=0, SINGLE_BLOCK=1, DUAL_BLOCK=2, PERSISTENT=3)
-
-
-class NVWaveNetLauncher(Thread):
-    def __init__(self, wavenet, cond_input, implementation):
-        assert(isinstance(wavenet, NVWaveNet))
-        self.wavenet = wavenet
-        self.cond_input = cond_input
-        self.implementation = implementation
-
-    def run(self):
-        return self.wavenet.infer(self.cond_input, self.implementation)
-
 
 class NVWaveNet:
     def __init__(self, embedding_prev,

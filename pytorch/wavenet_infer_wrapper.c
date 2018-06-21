@@ -87,8 +87,7 @@ int infer(THCudaIntTensor* samples_tensor,
                   use_embed_tanh,
                   cond_input,
                   implementation,
-                  samples,
-                  true);
+                  samples);
 
     free(in_layer_weights_prev);
     free(in_layer_weights_curr);
