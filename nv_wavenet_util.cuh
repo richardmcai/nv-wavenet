@@ -41,7 +41,7 @@ inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort=t
 
 int getOccupancy(int deviceId, size_t blockSize, void* func) {
     cudaDeviceProp prop;
-    gpuErrChk ( cudaGetDeviceProperties(&prop, 0) );
+    gpuErrChk ( cudaGetDeviceProperties(&prop, deviceId) );
     cudaOccDeviceProp occProp = prop;
 
     cudaFuncAttributes attr;
