@@ -26,6 +26,7 @@
 # *****************************************************************************
 import torch
 import nv_wavenet_ext
+from threading import Thread
 
 def interleave_lists(a, b, c, d, e, f, g):
     return [x for t in zip(a, b, c, d, e, f, g) for x in t] 
@@ -51,6 +52,16 @@ def column_major(x):
 def enum(**enums):
     return type('Enum', (), enums)
 Impl = enum(AUTO=0, SINGLE_BLOCK=1, DUAL_BLOCK=2, PERSISTENT=3)
+
+class NVWaveNetLauncher(Thread):
+    def __init__(self, wavenet, cond_input, implementation, samples=None):
+        self.wavenet = wavenet
+        self.cond_input = cond_input
+        self.implementation = implementation
+        self.samples = samples
+
+    def run(self):
+        self.samples = self.wavenet.infer(self.cond_input, self.implementation, self.samples)
 
 class NVWaveNet:
     def __init__(self, embedding_prev,
@@ -169,7 +180,7 @@ class NVWaveNet:
                                        skip_weights,
                                        skip_biases)
 
-    def infer(self, cond_input, implementation):
+    def infer(self, cond_input, implementation, samples=None):
         # cond_input is channels x batch x num_layers x samples
         assert(cond_input.size()[0:3:2] == (2*self.R, self.num_layers)), \
         """Inputs are channels x batch x num_layers x samples.
@@ -179,7 +190,8 @@ class NVWaveNet:
         batch_size = cond_input.size(1)
         sample_count = cond_input.size(3)
         cond_input = column_major(cond_input)
-        samples = torch.cuda.IntTensor(batch_size, sample_count)
+        if samples is None:
+            samples = torch.cuda.IntTensor(batch_size, sample_count)
         nv_wavenet_ext.infer(samples,
                              sample_count,
                              batch_size,
