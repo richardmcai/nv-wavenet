@@ -59,13 +59,13 @@ void* printBufferRate(void *args_p) {
     }
     end = clock();
 
-    float elapsed_time = ((float) (end - start)) / CLOCKS_PER_SEC;
-    float initial_delay = ((float) (delay_initial - start)) / CLOCKS_PER_SEC;
-    float average_delay =  elapsed_time / ((num_samples + buffer_size-1) / buffer_size);
+    float elapsed_time = (float) (end - start) / CLOCKS_PER_SEC;
+    float initial_delay = (float) (delay_initial - start) / CLOCKS_PER_SEC;
+    float average_delay =  elapsed_time / ((float) num_samples / buffer_size);
 
     printf("Buffer Rate: %d samples every %f seconds\n", buffer_size, average_delay);
     printf("Initial Delay: %f seconds\n", initial_delay);
-    printf("Effective Sample Rate: %f Hz\n", num_samples / elapsed_time / 1000.0);
+    printf("Effective Sample Rate: %f kHz\n", num_samples / elapsed_time / 1000.0);
 
     return NULL;
 }

@@ -49,7 +49,7 @@ test : math_test nv_wavenet_test
 	nv_wavenet_test
 
 nv_wavenet_perf : nv_wavenet_perf.cu $(HEADERS)
-	$(NVCC) $(NVCC_FLAGS) -maxrregcount $(MAX_REGS) --ptxas-options=-v nv_wavenet_perf.cu -o nv_wavenet_perf
+	$(NVCC) $(NVCC_FLAGS) -maxrregcount $(MAX_REGS) nv_wavenet_perf.cu -o nv_wavenet_perf
 
 nv_wavenet_test : nv_wavenet_test.cu matrix.cpp matrix.h nv_wavenet_reference.cpp $(HEADERS)
 	$(NVCC) $(NVCC_FLAGS) -lineinfo -maxrregcount $(MAX_REGS) nv_wavenet_test.cu matrix.cpp nv_wavenet_reference.cpp -o nv_wavenet_test
