@@ -38,9 +38,11 @@
 
 template <typename T_weight, typename T_data >
 struct nv_wavenet_params {
-    int num_samples;
-    int batch_size;
     int num_layers;
+    int maxDilation;
+    int batch_size;
+    int num_samples;
+
     int* yInPrev;
     int* yInCur;
     T_data* embedPrev;
@@ -72,7 +74,8 @@ struct nv_wavenet_params {
     float* outputSelectors;
     int* yOut;
     bool dumpActivations;
-    int maxDilation;
+    int* streamLock;
+    int bufferSize;
 
     T_data* h;
     volatile int*    hSample;
@@ -223,11 +226,12 @@ class nvWavenetInfer {
         PERSISTENT
     };
     protected:
-
         Implementation m_implementation;
 
         int m_numLayers;
+        int m_maxDilation;
         int m_maxBatch; 
+        int m_maxSamples;
 
         int* m_yOut;
         float* m_outputSelectors;
@@ -272,10 +276,6 @@ class nvWavenetInfer {
         int*    m_hSample;
         int*    m_ySample;
 
-        int m_maxDilation;
-
-        int m_maxSamples;
-
         void setActivation(float* dst, float* src, size_t size) {
             gpuErrChk(cudaMemcpy(dst, src, size*sizeof(float), cudaMemcpyDefault));
         }
@@ -303,8 +303,6 @@ class nvWavenetInfer {
 
     public:
         nvWavenetInfer (int numLayers, int maxDilation, int batchSize, int numSamples, int impl=0, bool tanhEmbed=true) : m_numLayers(numLayers), m_maxBatch(batchSize), m_maxSamples(numSamples), m_implementation((nvWavenetInfer::Implementation)impl), m_tanhEmbed(tanhEmbed) {
-
-
             m_maxDilation = maxDilation;
 
             gpuErrChk(cudaMalloc(&m_yOut, numSamples*batchSize*sizeof(int))); // one-hot vector represented as single value indicating which value is set
@@ -431,8 +429,7 @@ class nvWavenetInfer {
         }
         void getP(float* hP) { getActivation(hP, m_p, m_maxBatch*A); }
 
-        bool run(int num_samples, int batch_size, int* yOut=NULL, int batch_size_per_block=1, bool dumpActivations=false, cudaStream_t stream = 0) {
-
+        bool run(int num_samples, int batch_size, int* yOut=NULL, int batch_size_per_block=1, bool dumpActivations=false, cudaStream_t stream=0, bool streaming=false, int* num_buffered=NULL, bufferSize=16000) {
             Implementation impl = m_implementation;
             if (impl == AUTO) {
                 if ((S == 2*R) && m_numLayers <= 20) {
@@ -446,10 +443,33 @@ class nvWavenetInfer {
                 assert(S<=4*R);
             }
 
+            volatile int* streamLock, m_streamLock = NULL;
+            bool destroy = false;
+            cudaStream_t copyStream;
+            if (streaming) {
+                cudaDeviceProp prop;
+                gpuErrChk(cudaGetDeviceProperties(&prop, 0));
+                assert(prop.asyncEngineCount > 0);
+                assert(num_buffered != NULL);
+
+                gpuErrChk(cudaHostRegister(yOut, m_maxSamples*m_maxBatch*sizeof(int), cudaHostRegisterDefault));
+                gpuErrChk(cudaHostAlloc((void **) &streamLock, sizeof(int), cudaHostAllocMapped));
+                gpuErrChk(cudaHostGetDevicePointer((int **) &m_streamLock, (int *) streamLock, 0));
+
+                if (stream == 0) {
+                    printf("Streaming inference doesn't support default stream, launching kernel on new stream...");
+                    cudaStreamCreate(&stream); // consider asigning priority
+                    destroy = true;
+                }
+                cudaStreamCreate(copyStream);
+                streamLock = 0;
+            }
+
             nv_wavenet_params<T_weight, T_data> params;
-            params.num_samples = num_samples;
-            params.batch_size = batch_size;
             params.num_layers = m_numLayers;
+            params.maxDilation = m_maxDilation;
+            params.batch_size = batch_size;
+            params.num_samples = num_samples;
             params.yInPrev = m_yInPrev;
             params.yInCur = m_yInCur;
             params.embedPrev = m_embedPrev;
@@ -480,7 +500,8 @@ class nvWavenetInfer {
             params.outputSelectors = m_outputSelectors;
             params.yOut = m_yOut;
             params.dumpActivations = dumpActivations;
-            params.maxDilation = m_maxDilation;
+            params.streamLock = m_streamLock;
+            params.bufferSize = bufferSize;
 
             params.h = m_h;
             params.hSample = m_hSample;
@@ -543,7 +564,29 @@ class nvWavenetInfer {
                     result =  launch_singleBlock<T_weight, T_data, R, S, A, 1>(params, stream);
                 }
             }
-            if (yOut != NULL) {
+
+            if (streaming) {
+                if (result == true) {
+                    int buffered = 0, generated, copy;
+                    while (generated = streamLock <= num_samples) {
+                        if (generated > buffered) {
+                            copy = (bufferSize < generated-buffered) ? bufferSize : generated-buffered; // maintain constant buffer rate by bottlenecking faster-than-buffer-rate inference. TODO: test perf impact
+                            for (int batch = 0; batch < batch_size; batch++) {
+                                gpuErrChk(cudaMemcpyAsync(yOut[batch*num_samples+buffered], m_yOut[batch*num_samples+buffered], copy, cudaMemcpyDeviceToHost, copyStream));
+                            }
+                            buffered += copy;
+
+                            gpuErrChk(cudaStreamSynchronize(copyStream)); // don't allow access to unbuffered data
+                            *num_buffered = buffered;
+                        }
+                    }
+                }
+
+                if (destroy) {
+                    cudaStreamDestroy(stream);
+                }
+                cudaStreamDestroy(copyStream);
+            } else if (yOut != NULL) {
                 gpuErrChk(cudaMemcpyAsync(yOut, m_yOut, m_maxSamples*m_maxBatch*sizeof(int), cudaMemcpyDeviceToHost, stream));
             }
             return result;

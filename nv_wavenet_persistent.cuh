@@ -169,17 +169,17 @@ __device__ void nv_wavenet_persistent_GEMM_MxK(int thread_id, int num_samples, v
 template <typename T_weight, typename T_data, int TILE_M, int TILE_K, int BATCH_UNROLL>
 __device__ void nv_wavenet_persistent_GEMM(int thread_id, int num_samples, volatile int* ySample, int tile_id, int batch_size,
         T_weight* W, T_data* B, volatile T_data* act_in, T_data* act_out, T_data* accum_in, int gemm_m, int gemm_k, bool doRelu=false) {
+    
+    int tiles_m = gemm_m / TILE_M;
+    int tiles_k = gemm_k / TILE_K;
 
-   int tiles_m = gemm_m / TILE_M;
-   int tiles_k = gemm_k / TILE_K;
+    int tile_id_m = tile_id % tiles_m;
+    int tile_id_k = tile_id / tiles_m;
 
-   int tile_id_m = tile_id % tiles_m;
-   int tile_id_k = tile_id / tiles_m;
+    int tile_offset_m = tile_id_m*TILE_M;
+    int tile_offset_k = tile_id_k*TILE_K;
 
-   int tile_offset_m = tile_id_m*TILE_M;
-   int tile_offset_k = tile_id_k*TILE_K;
-
-   T_data* bias = (tile_id_k == 0) ? B + tile_offset_m : NULL;
+    T_data* bias = (tile_id_k == 0) ? B + tile_offset_m : NULL;
 
     nv_wavenet_persistent_GEMM_MxK<T_weight, T_data, TILE_M, TILE_K, BATCH_UNROLL>(thread_id, num_samples, ySample, tile_id_k, tiles_k, batch_size,
         W + tile_offset_m, bias, act_in + tile_offset_k, act_out + tile_offset_m, accum_in + tile_offset_m, gemm_m, gemm_k, gemm_m, doRelu && (tile_id_k == tiles_k-1)); 
@@ -342,15 +342,22 @@ __device__ void nv_wavenet_persistent_res(int row, int num_samples, volatile int
 
 template <typename T_weight, typename T_data, int R, int BATCH_UNROLL>
 __device__ void nv_wavenet_persistent_cur_res(int thread_id, int num_samples, volatile int* ySample, int layer, int num_layers, int batch_size, int maxDilation,
-        T_weight* Wcur, T_data* B, T_data* L, T_weight* Wres, T_data* Bres, T_data* a_prev, T_data* xt, T_data* h, T_data* xtOut, bool dumpActivations, int* yInPrev, int* yInCur, T_data* embedPrev, T_data* embedCur, bool tanhEmbed) {
+        T_weight* Wcur, T_data* B, T_data* L, T_weight* Wres, T_data* Bres, T_data* a_prev, T_data* xt, T_data* h, T_data* xtOut, bool dumpActivations, int* yInPrev, int* yInCur, T_data* embedPrev, T_data* embedCur, bool tanhEmbed, volatile int* streamLock, int bufferSize) {
     
     __shared__ T_data a_cur_sh[BATCH_UNROLL][2*R];
     if (thread_id < R) {
-        for (int sample=0; sample<num_samples; sample++) {
+        for (int sample=0; sample<=num_samples; sample++) {
             sampleLockAcquire<BATCH_UNROLL>(0,sample,ySample);
             for (int batch_offset = 0; batch_offset < batch_size; batch_offset += BATCH_UNROLL) {
                 if (batch_offset+BATCH_UNROLL<batch_size) sampleLockAcquire<BATCH_UNROLL>(batch_offset+BATCH_UNROLL,sample,ySample);
                 else __syncthreads();
+            }
+
+            if (streamLock != NULL && threadIdx.x == 0 && layer === 0) {
+                if (sample % bufferSize == 0 || sample == num_samples) {
+                    *streamLock = sample; // copy everything up to but not including current sample
+                    __threadfence_system();
+                }
             }
         }
     }
@@ -367,7 +374,9 @@ __device__ void nv_wavenet_persistent_cur_res(int thread_id, int num_samples, vo
 }
 
 template <typename T_weight, typename T_data, int R, int S, int A, int BATCH_UNROLL>
-__device__ void nv_wavenet_persistent_softmax(int block_id, int batch_size, int num_layers, int num_samples, int maxDilation, volatile T_data* outAccumulate, float* outputSelectors, T_data* p, int* yOut, int* yInPrev, int* yInCur, volatile int* ySample, T_data* xt, T_data* a_prev, T_data* h, T_data* skip_out, T_data* skipOutAccumulate, bool dumpActivations) {
+__device__ void nv_wavenet_persistent_softmax(int block_id, int batch_size, int num_layers, int num_samples, int maxDilation,
+        volatile T_data* outAccumulate, float* outputSelectors, T_data* p, int* yOut, int* yInPrev, int* yInCur, volatile int* ySample, T_data* xt, T_data* a_prev, T_data* h, T_data* skip_out, T_data* skipOutAccumulate, bool dumpActivations) {
+    
     for (int sample = 0; sample < num_samples; sample++) {
         __shared__ T_data out_sh[BATCH_UNROLL][A];
         __shared__ T_data p_sh[BATCH_UNROLL][A];
@@ -521,7 +530,9 @@ __global__ void nv_wavenet_persistent(nv_wavenet_params<T_weight, T_data> params
     // Softmax
     else {
         int block_id = blockIdx.x - prev_blocks - cur_blocks - skip_blocks - Zs_blocks - Za_blocks;
-        nv_wavenet_persistent_softmax<T_weight, T_data, R, S, A, 1>(block_id, params.batch_size, params.num_layers, params.num_samples, params.maxDilation, params.outAccumulate, params.outputSelectors, params.p, params.yOut, params.yInPrev, params.yInCur, params.ySample, params.xt, params.a_prev, params.h, params.skip_out, params.skipOutAccumulate, params.dumpActivations);
+        nv_wavenet_persistent_softmax<T_weight, T_data, R, S, A, 1>(block_id,
+            params.batch_size, params.num_layers, params.num_samples, params.maxDilation,
+            params.outAccumulate, params.outputSelectors, params.p, params.yOut, params.yInPrev, params.yInCur, params.ySample, params.xt, params.a_prev, params.h, params.skip_out, params.skipOutAccumulate, params.dumpActivations, params.streamLock, params.bufferSize);
     }
 }
 
