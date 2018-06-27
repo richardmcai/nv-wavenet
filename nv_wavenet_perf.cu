@@ -70,7 +70,7 @@ float getSampleRateT(int num_layers, int max_dilation, int batch_size, int batch
     gpuErrChk(cudaEventCreate(&stop));
     gpuErrChk(cudaStreamCreate(&stream));
     if (buffer_size > 0) {
-        int *yOut[num_samples*buffer_size], num_buffered=0;
+        int yOut[num_samples*buffer_size], num_buffered=0;
         int buffered = 0;
 
         gpuErrChk(cudaEventRecord(start, stream));
