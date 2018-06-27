@@ -29,6 +29,46 @@
 #include <stdio.h>
 #include <vector>
 #include <unistd.h>
+#include <time.h>
+#include <pthread.h>
+
+struct arguments {
+    int num_samples;
+    int buffer_size;
+    int *num_buffered;
+    cudaEvent_t startEvent;
+};
+
+void* printBufferRate(void *args_p) {
+    struct arguments *args = (struct arguments *) args_p;
+    int num_samples = args->num_samples;
+    int buffer_size = args->buffer_size;
+    int *num_buffered = args->num_buffered;
+    cudaEvent_t startEvent = args->startEvent;
+
+    clock_t start, end, delay_initial;
+    gpuErrChk(cudaEventSynchronize(startEvent));
+    start = clock();
+    for (int prev = 0; prev < num_samples; ) {
+        if (*num_buffered > prev) {
+            if (prev == 0) {
+                delay_initial = clock();
+            }
+            prev = *num_buffered;
+        }
+    }
+    end = clock();
+
+    float elapsed_time = ((float) (end - start)) / CLOCKS_PER_SEC;
+    float initial_delay = ((float) (delay_initial - start)) / CLOCKS_PER_SEC;
+    float average_delay =  elapsed_time / ((num_samples + buffer_size-1) / buffer_size);
+
+    printf("Buffer Rate: %d samples every %f seconds\n", buffer_size, average_delay);
+    printf("Initial Delay: %f seconds\n", initial_delay);
+    printf("Effective Sample Rate: %f Hz\n", num_samples / elapsed_time / 1000.0);
+
+    return NULL;
+}
 
 template <typename T_weight, typename T_data, int R, int S, int A>
 float getSampleRateT(int num_layers, int max_dilation, int batch_size, int batch_size_per_block, int num_samples, int mode, int buffer_size) {
@@ -64,38 +104,46 @@ float getSampleRateT(int num_layers, int max_dilation, int batch_size, int batch
     gpuErrChk(cudaDeviceSynchronize());
 
     cudaEvent_t start, stop;
-    cudaStream_t stream;
     bool success = false;
     gpuErrChk(cudaEventCreate(&start));
     gpuErrChk(cudaEventCreate(&stop));
-    gpuErrChk(cudaStreamCreate(&stream));
+    
     if (buffer_size > 0) {
-        int yOut[num_samples*buffer_size], num_buffered=0;
-        int buffered = 0;
-
+        int yOut[num_samples*batch_size];
+        int *num_buffered = (int *) malloc(sizeof(int));
+        
+        pthread_t buffer_thread;
+        struct arguments *args = (struct arguments *) malloc(sizeof(struct arguments));
+        args->num_samples = num_samples;
+        args->buffer_size = buffer_size;
+        args->num_buffered = num_buffered;
+        args->startEvent = start;
+        pthread_create(&buffer_thread, NULL, printBufferRate, (void *) args);
+        
+        cudaStream_t stream;
+        gpuErrChk(cudaStreamCreate(&stream));
         gpuErrChk(cudaEventRecord(start, stream));
-        success = infer.run(num_samples,batch_size, yOut, batch_size_per_block, false, 0, true, &num_buffered, buffer_size);
+        success = infer.run(num_samples,batch_size, yOut, batch_size_per_block, false, stream, true, num_buffered, buffer_size);
         gpuErrChk(cudaEventRecord(stop, stream));
-
-        while (buffered < num_samples) {
-            if (num_buffered > buffered) {
-                printf("%d samples buffered\n", num_buffered);
-                buffered = num_buffered;
-            }
-        }
+        gpuErrChk(cudaEventSynchronize(stop));
+        gpuErrChk(cudaStreamDestroy(stream));
+        
+        pthread_join(buffer_thread, NULL);
+        free((void *) args);
+        free((void *) num_buffered);
     } else {
         gpuErrChk(cudaEventRecord(start));
         success = infer.run(num_samples,batch_size, NULL, batch_size_per_block);
         gpuErrChk(cudaEventRecord(stop));
+        gpuErrChk(cudaEventSynchronize(stop));
     }
+    
 
-    gpuErrChk(cudaEventSynchronize(stop));
     float elapsed_time_ms;
     gpuErrChk(cudaEventElapsedTime(&elapsed_time_ms, start, stop));
     gpuErrChk(cudaDeviceSynchronize());
 
     free(conditioning);
-    gpuErrChk(cudaStreamDestroy(stream));
     return success ? float(num_samples) / elapsed_time_ms : 0.f;
 
 }
@@ -237,11 +285,12 @@ int main(int argc, char* argv[]) {
     }
     assert(precision == 16 || precision == 32);
     printf("precision: fp%d\n", precision);
-    printf("streaming: %s\n", (bool) buffer_size > 0);
+    printf("streaming: %s\n", buffer_size > 0 ? "true" : "false");
     printf("buffer size: %d\n", buffer_size);
+    printf("\n");
 
     srand(1);
 
     float sample_rate = getSampleRate(precision, r, s, a, num_layers, max_dilation, batch_size, batch_size_per_block, num_samples, mode, buffer_size);
-    printf("Sample rate: %f kHz\n", sample_rate);
+    printf("Maximum Sample Rate: %f kHz\n", sample_rate);
 }

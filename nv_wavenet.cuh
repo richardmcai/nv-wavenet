@@ -457,12 +457,12 @@ class nvWavenetInfer {
                 gpuErrChk(cudaHostGetDevicePointer((int **) &m_streamLock, (int *) streamLock, 0));
 
                 if (stream == 0) {
-                    printf("Streaming inference doesn't support default stream, launching kernel on new stream...");
-                    cudaStreamCreate(&stream); // consider asigning priority
+                    printf("Streaming inference doesn't support default stream, launching kernel on new stream...\n");
+                    gpuErrChk(cudaStreamCreate(&stream)); // consider asigning priority
                     destroy = true;
                 }
                 gpuErrChk(cudaStreamCreate(&copyStream));
-                streamLock = 0;
+                *streamLock = 0;
                 *num_buffered = 0;
             }
 
@@ -569,7 +569,7 @@ class nvWavenetInfer {
             if (streaming) {
                 if (result == true) {
                     int generated, copySize, offset;
-                    while (generated = *streamLock <= num_samples) {
+                    while ((generated = *streamLock) <= num_samples && *num_buffered < num_samples) {
                         if (generated > *num_buffered) {
                             copySize = (bufferSize < generated-*num_buffered) ? bufferSize : generated-*num_buffered; // maintain constant buffer rate by bottlenecking faster-than-buffer-rate inference. TODO: test perf impact
                             for (int batch = 0; batch < batch_size; batch++) {
@@ -585,7 +585,7 @@ class nvWavenetInfer {
 
                 gpuErrChk(cudaHostUnregister(yOut));
                 gpuErrChk(cudaFreeHost((void *) streamLock));
-                
+
                 if (destroy) {
                     gpuErrChk(cudaStreamDestroy(stream));
                 }
