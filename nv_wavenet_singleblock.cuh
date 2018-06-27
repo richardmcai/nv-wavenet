@@ -247,6 +247,14 @@ __global__ void nv_wavenet_singleBlock_8R(nv_wavenet_params<T_weight, T_data> pa
                     params.yInCur[batch_offset+u] = yOut_sh[u];
                 }
             }
+
+            __threadfence();
+            if (params.streamLock != NULL && threadIdx.x == 0) {
+                if (sample+1 % params.bufferSize == 0 || sample+1 == params.num_samples) {
+                    *params.streamLock = sample+1; // copy everything up to and including current sample
+                    __threadfence_system();
+                }
+            }
         }
         else if (threadIdx.x < A+4*R && sample+1<params.num_samples) { // next A threads compute previous dilated convolutions
             // Precompute prev for next sample

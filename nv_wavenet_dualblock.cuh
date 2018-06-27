@@ -291,6 +291,12 @@ __device__ void nv_wavenet_dualBlock_B(nv_wavenet_params<T_weight, T_data> param
         if (row < BATCH_UNROLL) {
             params.ySample[batch_offset+row] = sample+1;
         }
+        if (params.streamLock != NULL && threadIdx.x == 0) {
+            if (sample+1 % params.bufferSize == 0 || sample+1 == params.num_samples) {
+                *params.streamLock = sample+1; // copy everything up to and including current sample
+                __threadfence_system();
+            }
+        }
 
     }
 }
