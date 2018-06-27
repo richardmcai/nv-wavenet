@@ -567,17 +567,17 @@ class nvWavenetInfer {
 
             if (streaming) {
                 if (result == true) {
-                    int buffered = 0, generated, copy;
+                    int generated, copySize, offset;
                     while (generated = *streamLock <= num_samples) {
-                        if (generated > buffered) {
-                            copy = (bufferSize < generated-buffered) ? bufferSize : generated-buffered; // maintain constant buffer rate by bottlenecking faster-than-buffer-rate inference. TODO: test perf impact
+                        if (generated > *num_buffered) {
+                            copySize = (bufferSize < generated-*num_buffered) ? bufferSize : generated-*num_buffered; // maintain constant buffer rate by bottlenecking faster-than-buffer-rate inference. TODO: test perf impact
+                            offset = batch*num_samples + *num_buffered;
                             for (int batch = 0; batch < batch_size; batch++) {
-                                gpuErrChk(cudaMemcpyAsync(yOut+batch*num_samples+buffered, m_yOut+batch*num_samples+buffered, copy, cudaMemcpyDeviceToHost, copyStream));
+                                gpuErrChk(cudaMemcpyAsync(yOut+offset, m_yOut+offset, copySize, cudaMemcpyDeviceToHost, copyStream));
                             }
-                            buffered += copy;
 
                             gpuErrChk(cudaStreamSynchronize(copyStream)); // don't allow access to unbuffered data
-                            *num_buffered = buffered;
+                            *num_buffered += copySize;
                         }
                     }
                 }
@@ -586,9 +586,9 @@ class nvWavenetInfer {
                 gpuErrChk(cudaFreeHost(streamLock));
                 
                 if (destroy) {
-                    cudaStreamDestroy(stream);
+                    gpuErrChk(cudaStreamDestroy(stream));
                 }
-                cudaStreamDestroy(copyStream);
+                gpuErrChk(cudaStreamDestroy(copyStream));
             } else if (yOut != NULL) {
                 gpuErrChk(cudaMemcpyAsync(yOut, m_yOut, m_maxSamples*m_maxBatch*sizeof(int), cudaMemcpyDeviceToHost, stream));
             }
