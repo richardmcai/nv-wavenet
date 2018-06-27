@@ -31,7 +31,7 @@
 #include <unistd.h>
 
 template <typename T_weight, typename T_data, int R, int S, int A>
-float getSampleRateT(int num_layers, int max_dilation, int batch_size, int batch_size_per_block, int num_samples, int mode) {
+float getSampleRateT(int num_layers, int max_dilation, int batch_size, int batch_size_per_block, int num_samples, int mode, buffer_size) {
 
     // Set up initial activations
 
@@ -64,11 +64,30 @@ float getSampleRateT(int num_layers, int max_dilation, int batch_size, int batch
     gpuErrChk(cudaDeviceSynchronize());
 
     cudaEvent_t start, stop;
+    cudaStream_t stream;
+    bool success = false;
     gpuErrChk(cudaEventCreate(&start));
     gpuErrChk(cudaEventCreate(&stop));
-    gpuErrChk(cudaEventRecord(start));
-    bool success = infer.run(num_samples,batch_size, NULL, batch_size_per_block);
-    gpuErrChk(cudaEventRecord(stop));
+    gpuErrChk(cudaStreamCreate(&stream));
+    if (buffer_size > 0) {
+        int *yOut[num_samples*buffer_size], num_buffered=0;
+        int buffered = 0;
+
+        gpuErrChk(cudaEventRecord(start, stream));
+        success = infer.run(num_samples,batch_size, yOut, batch_size_per_block, false, 0, true, &num_buffered, buffer_size);
+        gpuErrChk(cudaEventRecord(stop, stream));
+
+        while (buffered < num_samples) {
+            if (num_buffered > buffered) {
+                printf("%d samples buffered\n", num_buffered);
+                buffered = num_buffered;
+            }
+        }
+    } else {
+        gpuErrChk(cudaEventRecord(start));
+        success = infer.run(num_samples,batch_size, NULL, batch_size_per_block);
+        gpuErrChk(cudaEventRecord(stop));
+    }
 
     gpuErrChk(cudaEventSynchronize(stop));
     float elapsed_time_ms;
@@ -76,40 +95,41 @@ float getSampleRateT(int num_layers, int max_dilation, int batch_size, int batch
     gpuErrChk(cudaDeviceSynchronize());
 
     free(conditioning);
+    gpuErrChk(cudaStreamDestroy(stream));
     return success ? float(num_samples) / elapsed_time_ms : 0.f;
 
 }
 
-float getSampleRate(int precision, int r, int s, int a, int num_layers, int max_dilation, int batch_size, int batch_size_per_block, int num_samples, int mode) {
+float getSampleRate(int precision, int r, int s, int a, int num_layers, int max_dilation, int batch_size, int batch_size_per_block, int num_samples, int mode, buffer_size) {
     assert(a==256);
     float sample_rate;
     if (r == 32) {
         assert(s==128);
         assert(a==256);
         if (precision == 16) {
-                sample_rate = getSampleRateT<half2,half,32,128,256>(num_layers, max_dilation, batch_size, batch_size_per_block, num_samples, mode);
+                sample_rate = getSampleRateT<half2,half,32,128,256>(num_layers, max_dilation, batch_size, batch_size_per_block, num_samples, mode, buffer_size);
         }
         else {
             assert(precision==32);
-                sample_rate = getSampleRateT<float,float,32,128,256>(num_layers, max_dilation, batch_size, batch_size_per_block, num_samples, mode);
+                sample_rate = getSampleRateT<float,float,32,128,256>(num_layers, max_dilation, batch_size, batch_size_per_block, num_samples, mode, buffer_size);
         }
     }
     else {
         assert(r==64);
         if (precision == 16) {
             if (s==128) 
-                sample_rate = getSampleRateT<half2,half,64,128,256>(num_layers, max_dilation, batch_size, batch_size_per_block, num_samples, mode);
+                sample_rate = getSampleRateT<half2,half,64,128,256>(num_layers, max_dilation, batch_size, batch_size_per_block, num_samples, mode, buffer_size);
             else if (s==256)
-                sample_rate = getSampleRateT<half2,half,64,256,256>(num_layers, max_dilation, batch_size, batch_size_per_block, num_samples, mode);
+                sample_rate = getSampleRateT<half2,half,64,256,256>(num_layers, max_dilation, batch_size, batch_size_per_block, num_samples, mode, buffer_size);
             else
                 assert(false);
         }
         else {
             assert(precision==32);
             if (s==128) 
-                sample_rate = getSampleRateT<float,float,64,128,256>(num_layers, max_dilation, batch_size, batch_size_per_block, num_samples, mode);
+                sample_rate = getSampleRateT<float,float,64,128,256>(num_layers, max_dilation, batch_size, batch_size_per_block, num_samples, mode, buffer_size);
             else if (s==256)
-                sample_rate = getSampleRateT<float,float,64,256,256>(num_layers, max_dilation, batch_size, batch_size_per_block, num_samples, mode);
+                sample_rate = getSampleRateT<float,float,64,256,256>(num_layers, max_dilation, batch_size, batch_size_per_block, num_samples, mode, buffer_size);
             else
                 assert(false);
         }
@@ -146,9 +166,10 @@ int main(int argc, char* argv[]) {
     int max_dilation = 512;
     int mode = 0;
     int precision = 16;
+    int buffer_size = 0;
 
     int c;
-    while ((c = getopt (argc, argv, "l:r:s:a:b:n:c:d:m:p:")) != -1) {
+    while ((c = getopt (argc, argv, "l:r:s:a:b:n:c:d:m:p:f:")) != -1) {
         switch (c) {
             case 'l':
                 num_layers = atoi(optarg);
@@ -180,6 +201,9 @@ int main(int argc, char* argv[]) {
             case 'p':
                 precision = atoi(optarg);
                 break;
+            case 'f':
+                buffer_size = atoi(optarg);
+                break;
             default:
                 assert(false);
         }
@@ -204,7 +228,7 @@ int main(int argc, char* argv[]) {
     printf("batch size: %d\n", batch_size);
     printf("batch size per block: %d\n", batch_size_per_block);
     printf("num samples: %d\n", num_samples);
-    switch (mode) {
+    switch (mode, buffer_size) {
         case 0: printf("mode: AUTO\n"); break;
         case 1: printf("mode: SINGLE_block\n"); break;
         case 2: printf("mode: DUAL_block\n"); break;
@@ -213,9 +237,11 @@ int main(int argc, char* argv[]) {
     }
     assert(precision == 16 || precision == 32);
     printf("precision: fp%d\n", precision);
+    printf("streaming: %s\n", (bool) buffer_size > 0);
+    printf("buffer size: %d\n", buffer_size);
 
     srand(1);
 
-    float sample_rate = getSampleRate(precision, r, s, a, num_layers, max_dilation, batch_size, batch_size_per_block, num_samples, mode);
+    float sample_rate = getSampleRate(precision, r, s, a, num_layers, max_dilation, batch_size, batch_size_per_block, num_samples, mode, buffer_size);
     printf("Sample rate: %f kHz\n", sample_rate);
 }

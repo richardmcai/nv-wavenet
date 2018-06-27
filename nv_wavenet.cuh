@@ -461,8 +461,9 @@ class nvWavenetInfer {
                     cudaStreamCreate(&stream); // consider asigning priority
                     destroy = true;
                 }
-                cudaStreamCreate(&copyStream);
+                gpuErrChk(cudaStreamCreate(&copyStream));
                 streamLock = 0;
+                *num_buffered = 0;
             }
 
             nv_wavenet_params<T_weight, T_data> params;
@@ -573,7 +574,7 @@ class nvWavenetInfer {
                             copySize = (bufferSize < generated-*num_buffered) ? bufferSize : generated-*num_buffered; // maintain constant buffer rate by bottlenecking faster-than-buffer-rate inference. TODO: test perf impact
                             offset = batch*num_samples + *num_buffered;
                             for (int batch = 0; batch < batch_size; batch++) {
-                                gpuErrChk(cudaMemcpyAsync(yOut+offset, m_yOut+offset, copySize, cudaMemcpyDeviceToHost, copyStream));
+                                gpuErrChk(cudaMemcpyAsync(yOut+offset, m_yOut+offset, copySize*sizeof(int), cudaMemcpyDeviceToHost, copyStream));
                             }
 
                             gpuErrChk(cudaStreamSynchronize(copyStream)); // don't allow access to unbuffered data
