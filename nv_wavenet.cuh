@@ -584,7 +584,7 @@ class nvWavenetInfer {
                 }
 
                 gpuErrChk(cudaHostUnregister(yOut));
-                gpuErrChk(cudaFreeHost(streamLock));
+                gpuErrChk(cudaFreeHost((void *) streamLock));
                 
                 if (destroy) {
                     gpuErrChk(cudaStreamDestroy(stream));
