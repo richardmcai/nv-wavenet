@@ -31,7 +31,7 @@
 #include <unistd.h>
 
 template <typename T_weight, typename T_data, int R, int S, int A>
-float getSampleRateT(int num_layers, int max_dilation, int batch_size, int batch_size_per_block, int num_samples, int mode, buffer_size) {
+float getSampleRateT(int num_layers, int max_dilation, int batch_size, int batch_size_per_block, int num_samples, int mode, int buffer_size) {
 
     // Set up initial activations
 
@@ -100,7 +100,7 @@ float getSampleRateT(int num_layers, int max_dilation, int batch_size, int batch
 
 }
 
-float getSampleRate(int precision, int r, int s, int a, int num_layers, int max_dilation, int batch_size, int batch_size_per_block, int num_samples, int mode, buffer_size) {
+float getSampleRate(int precision, int r, int s, int a, int num_layers, int max_dilation, int batch_size, int batch_size_per_block, int num_samples, int mode, int buffer_size) {
     assert(a==256);
     float sample_rate;
     if (r == 32) {
@@ -228,7 +228,7 @@ int main(int argc, char* argv[]) {
     printf("batch size: %d\n", batch_size);
     printf("batch size per block: %d\n", batch_size_per_block);
     printf("num samples: %d\n", num_samples);
-    switch (mode, buffer_size) {
+    switch (mode) {
         case 0: printf("mode: AUTO\n"); break;
         case 1: printf("mode: SINGLE_block\n"); break;
         case 2: printf("mode: DUAL_block\n"); break;
