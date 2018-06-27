@@ -353,7 +353,7 @@ __device__ void nv_wavenet_persistent_cur_res(int thread_id, int num_samples, vo
                 else __syncthreads();
             }
 
-            if (streamLock != NULL && threadIdx.x == 0 && layer === 0) {
+            if (streamLock != NULL && thread_id == 0 && layer == 0) {
                 if (sample % bufferSize == 0 || sample == num_samples) {
                     *streamLock = sample; // copy everything up to but not including current sample
                     __threadfence_system();
@@ -501,7 +501,7 @@ __global__ void nv_wavenet_persistent(nv_wavenet_params<T_weight, T_data> params
         int layer = blockIdx.x - prev_blocks;
         nv_wavenet_persistent_cur_res<T_weight, T_data, R, BATCH_UNROLL>(thread_id,
             params.num_samples, params.ySample, layer, params.num_layers, params.batch_size, params.maxDilation,
-            params.Wcur, params.B, params.L, params.Wres, params.Bres, params.a_prev, params.xt, params.h, params.xtOut, params.dumpActivations, params.yInPrev, params.yInCur, params.embedPrev, params.embedCur, params.tanhEmbed);
+            params.Wcur, params.B, params.L, params.Wres, params.Bres, params.a_prev, params.xt, params.h, params.xtOut, params.dumpActivations, params.yInPrev, params.yInCur, params.embedPrev, params.embedCur, params.tanhEmbed, params.streamLock, params.bufferSize);
     }
     else if (blockIdx.x < prev_blocks + cur_blocks + skip_blocks) {
         // Skip
@@ -532,7 +532,7 @@ __global__ void nv_wavenet_persistent(nv_wavenet_params<T_weight, T_data> params
         int block_id = blockIdx.x - prev_blocks - cur_blocks - skip_blocks - Zs_blocks - Za_blocks;
         nv_wavenet_persistent_softmax<T_weight, T_data, R, S, A, 1>(block_id,
             params.batch_size, params.num_layers, params.num_samples, params.maxDilation,
-            params.outAccumulate, params.outputSelectors, params.p, params.yOut, params.yInPrev, params.yInCur, params.ySample, params.xt, params.a_prev, params.h, params.skip_out, params.skipOutAccumulate, params.dumpActivations, params.streamLock, params.bufferSize);
+            params.outAccumulate, params.outputSelectors, params.p, params.yOut, params.yInPrev, params.yInCur, params.ySample, params.xt, params.a_prev, params.h, params.skip_out, params.skipOutAccumulate, params.dumpActivations);
     }
 }
 

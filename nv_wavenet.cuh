@@ -74,7 +74,7 @@ struct nv_wavenet_params {
     float* outputSelectors;
     int* yOut;
     bool dumpActivations;
-    int* streamLock;
+    volatile int* streamLock;
     int bufferSize;
 
     T_data* h;
@@ -429,7 +429,7 @@ class nvWavenetInfer {
         }
         void getP(float* hP) { getActivation(hP, m_p, m_maxBatch*A); }
 
-        bool run(int num_samples, int batch_size, int* yOut=NULL, int batch_size_per_block=1, bool dumpActivations=false, cudaStream_t stream=0, bool streaming=false, int* num_buffered=NULL, bufferSize=16000) {
+        bool run(int num_samples, int batch_size, int* yOut=NULL, int batch_size_per_block=1, bool dumpActivations=false, cudaStream_t stream=0, bool streaming=false, int* num_buffered=NULL, int bufferSize=16000) {
             Implementation impl = m_implementation;
             if (impl == AUTO) {
                 if ((S == 2*R) && m_numLayers <= 20) {
@@ -443,7 +443,7 @@ class nvWavenetInfer {
                 assert(S<=4*R);
             }
 
-            volatile int* streamLock, m_streamLock = NULL;
+            volatile int *streamLock, *m_streamLock = NULL;
             bool destroy = false;
             cudaStream_t copyStream;
             if (streaming) {
@@ -461,7 +461,7 @@ class nvWavenetInfer {
                     cudaStreamCreate(&stream); // consider asigning priority
                     destroy = true;
                 }
-                cudaStreamCreate(copyStream);
+                cudaStreamCreate(&copyStream);
                 streamLock = 0;
             }
 
@@ -568,11 +568,11 @@ class nvWavenetInfer {
             if (streaming) {
                 if (result == true) {
                     int buffered = 0, generated, copy;
-                    while (generated = streamLock <= num_samples) {
+                    while (generated = *streamLock <= num_samples) {
                         if (generated > buffered) {
                             copy = (bufferSize < generated-buffered) ? bufferSize : generated-buffered; // maintain constant buffer rate by bottlenecking faster-than-buffer-rate inference. TODO: test perf impact
                             for (int batch = 0; batch < batch_size; batch++) {
-                                gpuErrChk(cudaMemcpyAsync(yOut[batch*num_samples+buffered], m_yOut[batch*num_samples+buffered], copy, cudaMemcpyDeviceToHost, copyStream));
+                                gpuErrChk(cudaMemcpyAsync(yOut+batch*num_samples+buffered, m_yOut+batch*num_samples+buffered, copy, cudaMemcpyDeviceToHost, copyStream));
                             }
                             buffered += copy;
 
