@@ -572,8 +572,8 @@ class nvWavenetInfer {
                     while (generated = *streamLock <= num_samples) {
                         if (generated > *num_buffered) {
                             copySize = (bufferSize < generated-*num_buffered) ? bufferSize : generated-*num_buffered; // maintain constant buffer rate by bottlenecking faster-than-buffer-rate inference. TODO: test perf impact
-                            offset = batch*num_samples + *num_buffered;
                             for (int batch = 0; batch < batch_size; batch++) {
+                                offset = batch*num_samples + *num_buffered;
                                 gpuErrChk(cudaMemcpyAsync(yOut+offset, m_yOut+offset, copySize*sizeof(int), cudaMemcpyDeviceToHost, copyStream));
                             }
 
