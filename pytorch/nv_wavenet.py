@@ -170,7 +170,7 @@ class NVWaveNet:
                                        skip_weights,
                                        skip_biases)
 
-    def infer(self, cond_input, implementation, samples=None, buffer_size=0, num_buffered=None):
+    def infer(self, cond_input, implementation, samples=None, buffer_size=0, num_buffered=torch.IntTensor()):
         # cond_input is channels x batch x num_layers x samples
         assert(cond_input.size()[0:3:2] == (2*self.R, self.num_layers)), \
         """Inputs are channels x batch x num_layers x samples.
@@ -180,7 +180,8 @@ class NVWaveNet:
         batch_size = cond_input.size(1)
         sample_count = cond_input.size(3)
         cond_input = column_major(cond_input)
-        samples = torch.cuda.IntTensor(batch_size, sample_count)
+        if samples is None:
+            samples = torch.cuda.IntTensor(batch_size, sample_count)
         nv_wavenet_ext.infer(samples,
                              sample_count,
                              batch_size,
@@ -199,13 +200,14 @@ class NVWaveNet:
         return samples
 
     def infer_streaming(self, cond_input, implementation, samples, buffer_size):
-        num_buffered = torch.IntTensor(0)
-        launcher = Thread(target=self.infer, args=(self, cond_input, implementation, samples, buffer_size, num_buffered))
-        launcher.run()
+        num_buffered = torch.IntTensor([0])
+        launcher = Thread(target=self.infer, args=(cond_input, implementation, samples, buffer_size, num_buffered))
+        launcher.start()
 
         prev, sample_count = 0, cond_input.size(3)
         while prev < sample_count:
             cur = num_buffered.item()
             if cur > prev:
-                yield samples[:][prev:cur]
-                prev = cur
+                copy = min(cur-prev, buffer_size)
+                yield samples[:,prev:prev+copy]
+                prev += copy

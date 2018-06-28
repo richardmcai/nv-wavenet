@@ -30,60 +30,72 @@ import torch
 import nv_wavenet
 import utils
 from threading import Thread
+import pyaudio
+import numpy as np
+import time
 
-def write_data(files, output_dir, index, data, batch_size):
-    for batch, file_path in enumerate(files):
-        file_name = os.path.splitext(os.path.splitext(os.path.basename(file_path))[0])[0]
-        file_name = "{}/{}_{}.wav".format(output_dir, file_name, index)
+WIDTH = 2 # bytewidth of 16 linear PCM
+CHANNELS = 1
+RATE = 22050
 
-        audio_chunk = utils.mu_law_decode_numpy(data[batch,:].cpu().numpy(), 256)
-        audio_chunk = utils.MAX_WAV_VALUE * audio_chunk
-        wavdata = audio_chunk.astype('int16')
-        write(file_name, 22050, wavdata)
+def play(buffer_size, callback):
+    p = pyaudio.PyAudio()
 
-def chunker(seq, size):
-    """
-    https://stackoverflow.com/a/434328
-    """
-    return (seq[pos:pos + size] for pos in range(0, len(seq), size))
+    stream = p.open(format=p.get_format_from_width(WIDTH),
+                    channels=CHANNELS,
+                    rate=RATE,
+                    output=True,
+                    frames_per_buffer=buffer_size,
+                    stream_callback=callback)
 
+    stream.start_stream()
 
-def main(mel_files, model_filename, output_dir, batch_size, buffer_size, implementation):
-    mel_files = utils.files_to_list(mel_files)
+    while stream.is_active():
+        time.sleep(0.1)
+
+    stream.stop_stream()
+    stream.close()
+
+    p.terminate()
+
+def main(mel_file, model_filename, buffer_size, implementation):
     model = torch.load(model_filename)['model']
     wavenet = nv_wavenet.NVWaveNet(**(model.export_weights()))
-    
-    for files in chunker(mel_files, batch_size):
-        mels = []
-        for file_path in files:
-            print(file_path)
-            mel = torch.load(file_path)
-            mel = utils.to_gpu(mel)
-            mels.append(torch.unsqueeze(mel, 0))
-        cond_input = model.get_cond_input(torch.cat(mels, 0))
 
-        if buffer_size > 0:
-            sample_count = cond_input.size(3)
-            audio_data = torch.IntTensor(batch_size, sample_count)
+    mel = torch.load(mel_file)
+    mel = utils.to_gpu(mel)
+    mels = [torch.unsqueeze(mel, 0)]
+    cond_input = model.get_cond_input(torch.cat(mels, 0))
 
-            buffer = wavenet.infer_streaming(cond_input, implementation, audio_data, buffer_size)
-            for i, buffer_data in enumerate(buffer):
-                # print("buffer {} loaded".format(i))
-                writer = Thread(target=write_data, args=(files, output_dir, i, buffer_data, batch_size))
-                writer.start()
-        else:
-            audio_data = wavenet.infer(cond_input, implementation)
+    sample_count = cond_input.size(3)
+    buffer = wavenet.infer_streaming(cond_input, implementation, torch.IntTensor(1, sample_count), buffer_size)
+    def buffer_callback(in_data, frame_count, time_info, status):
+        #print('fetching buffer')
+        try:
+            audio_chunk = next(buffer)
+            audio_chunk = utils.mu_law_decode_numpy(audio_chunk[0,:].cpu().numpy(), 256)
+            audio_chunk = utils.MAX_WAV_VALUE * audio_chunk
+            if audio_chunk.shape[0] < frame_count:
+                audio_chunk = np.pad(audio_chunk, (0, frame_count-audio_chunk.shape[0]), 'constant', constant_values=0)
+            data = audio_chunk.astype('int16').tostring()
+            return (data, pyaudio.paContinue)
+        except:
+            return ('', pyaudio.paComplete)
 
-        write_data(files, output_dir, 'full', audio_data, batch_size)
+    # def chatter():
+    #     print("not blocked")
+
+    # chatter_t = Thread(target=chatter)
+    # chatter_t.start()
+
+    play(buffer_size, buffer_callback)
 
 if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser()
-    parser.add_argument('-f', "--filelist_path", required=True)
+    parser.add_argument('-f', "--file_path", required=True)
     parser.add_argument('-c', "--checkpoint_path", required=True)
-    parser.add_argument('-o', "--output_dir", required=True)
-    parser.add_argument('-b', "--batch_size", default=1)
     parser.add_argument('-s', "--buffer_size", type=int, default=0)
     parser.add_argument('-i', "--implementation", type=str, default="persistent",
                         help="""Which implementation of NV-WaveNet to use.
@@ -101,4 +113,4 @@ if __name__ == "__main__":
     else:
         raise ValueError("implementation must be one of auto, single, dual, or persistent")
     
-    main(args.filelist_path, args.checkpoint_path, args.output_dir, args.batch_size, args.buffer_size, implementation)
+    main(args.file_path, args.checkpoint_path, args.buffer_size, implementation)
