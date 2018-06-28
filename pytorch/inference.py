@@ -37,7 +37,7 @@ def chunker(seq, size):
     return (seq[pos:pos + size] for pos in range(0, len(seq), size))
 
 
-def main(mel_files, model_filename, output_dir, batch_size, implementation):
+def main(mel_files, model_filename, output_dir, batch_size, buffer_size, implementation):
     mel_files = utils.files_to_list(mel_files)
     model = torch.load(model_filename)['model']
     wavenet = nv_wavenet.NVWaveNet(**(model.export_weights()))
@@ -50,7 +50,22 @@ def main(mel_files, model_filename, output_dir, batch_size, implementation):
             mel = utils.to_gpu(mel)
             mels.append(torch.unsqueeze(mel, 0))
         cond_input = model.get_cond_input(torch.cat(mels, 0))
-        audio_data = wavenet.infer(cond_input, implementation)
+
+        if buffer_size > 0:
+            audio_data = torch.IntTensor(batch_size, sample_count)
+
+            buffer = wavenet.infer_streaming(cond_input, implementation, samples, buffer_size)
+            for i, buffer_data in enumerate(buffer):
+                for j, file_path in enumerate(files):
+                    file_name = os.path.splitext(os.path.basename(file_path))[0]
+
+                    audio_chunk = utils.mu_law_decode_numpy(buffer_data[j,:].numpy(), 256)
+                    audio_chunk = utils.MAX_WAV_VALUE * audio_chunk
+                    wavdata = audio_chunk.astype('int16')
+                    write("{}/{}_{}.wav".format(output_dir, file_name, i),
+                        22050, wavdata)
+        else:
+            audio_data = wavenet.infer(cond_input, implementation)
 
         for i, file_path in enumerate(files):
             file_name = os.path.splitext(os.path.basename(file_path))[0]
@@ -59,7 +74,7 @@ def main(mel_files, model_filename, output_dir, batch_size, implementation):
             audio = utils.MAX_WAV_VALUE * audio
             wavdata = audio.astype('int16')
             write("{}/{}.wav".format(output_dir, file_name),
-                  16000, wavdata)
+                  22050, wavdata)
 
 if __name__ == "__main__":
     import argparse
@@ -69,6 +84,7 @@ if __name__ == "__main__":
     parser.add_argument('-c', "--checkpoint_path", required=True)
     parser.add_argument('-o', "--output_dir", required=True)
     parser.add_argument('-b', "--batch_size", default=1)
+    parser.add_argument('-s', "--buffer_size", type=int, default=0)
     parser.add_argument('-i', "--implementation", type=str, default="persistent",
                         help="""Which implementation of NV-WaveNet to use.
                         Takes values of single, dual, or persistent""" )
@@ -85,4 +101,4 @@ if __name__ == "__main__":
     else:
         raise ValueError("implementation must be one of auto, single, dual, or persistent")
     
-    main(args.filelist_path, args.checkpoint_path, args.output_dir, args.batch_size, implementation)
+    main(args.filelist_path, args.checkpoint_path, args.output_dir, args.batch_size, args.buffer_size, implementation)

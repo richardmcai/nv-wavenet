@@ -27,6 +27,8 @@
 int infer(THCudaIntTensor* samples, 
           int sample_count,
           int batch_size,
+          int buffer_size,
+          THCudaIntTensor* num_buffered_tensor,
           THCudaTensor* embed_prev_tensor,
           THCudaTensor* embed_curr_tensor,
           THCudaTensor* conv_out_tensor,

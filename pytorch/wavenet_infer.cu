@@ -86,15 +86,17 @@ std::shared_ptr<MyWaveNet> make_wavenet(int sample_count,
 
 void infer(std::shared_ptr<MyWaveNet> wavenet,
 		   float* input_features,
-           int* samples,
            int sample_count,
-           int batch_size) {
+           int batch_size,
+           int buffer_size,
+           int* samples,
+           int* num_buffered) {
     Matrix outputSelectors(batch_size, sample_count);
     outputSelectors.randomize(0.5,1.0);
     wavenet->setInputs(input_features, outputSelectors.data());
 
     int batch_size_per_block = ((batch_size % 4) == 0) ? 4 : ((batch_size % 2) == 0) ? 2 : 1;
-    assert(wavenet->run(sample_count, batch_size, samples, batch_size_per_block, true));
+    assert(wavenet->run(sample_count, batch_size, samples, batch_size_per_block, false, 0, buffer_size, num_buffered));
     gpuErrChk(cudaDeviceSynchronize());
     return;
 }
@@ -104,6 +106,7 @@ void infer(std::shared_ptr<MyWaveNet> wavenet,
 // ------------------------------------------------
 void wavenet_infer(int sample_count,
                    int batch_size,
+                   int buffer_size,
                    float* embedding_prev,
                    float* embedding_curr,
                    int num_layers,
@@ -120,7 +123,8 @@ void wavenet_infer(int sample_count,
                    int use_embed_tanh,
                    float* cond_input,
                    int implementation,
-                   int* samples) {
+                   int* samples,
+                   int* num_buffered) {
 		std::shared_ptr<MyWaveNet> wavenet = make_wavenet(sample_count,
                                                          batch_size,
                                                          embedding_prev,
@@ -140,7 +144,7 @@ void wavenet_infer(int sample_count,
                                                          implementation
                                                          );
 		assert(samples);
-		infer(wavenet, cond_input, samples, sample_count, batch_size);
+		infer(wavenet, cond_input, sample_count, batch_size, buffer_size, samples, num_buffered);
 		return;
 }	
 

@@ -123,7 +123,7 @@ float getSampleRateT(int num_layers, int max_dilation, int batch_size, int batch
         cudaStream_t stream;
         gpuErrChk(cudaStreamCreate(&stream));
         gpuErrChk(cudaEventRecord(start, stream));
-        success = infer.run(num_samples,batch_size, yOut, batch_size_per_block, false, stream, true, num_buffered, buffer_size);
+        success = infer.run(num_samples,batch_size, yOut, batch_size_per_block, false, stream, buffer_size, num_buffered);
         gpuErrChk(cudaEventRecord(stop, stream));
         gpuErrChk(cudaEventSynchronize(stop));
         gpuErrChk(cudaStreamDestroy(stream));

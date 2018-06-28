@@ -429,7 +429,7 @@ class nvWavenetInfer {
         }
         void getP(float* hP) { getActivation(hP, m_p, m_maxBatch*A); }
 
-        bool run(int num_samples, int batch_size, int* yOut=NULL, int batch_size_per_block=1, bool dumpActivations=false, cudaStream_t stream=0, bool streaming=false, int* num_buffered=NULL, int bufferSize=16000) {
+        bool run(int num_samples, int batch_size, int* yOut=NULL, int batch_size_per_block=1, bool dumpActivations=false, cudaStream_t stream=0, int bufferSize=0, int* num_buffered=NULL) {
             Implementation impl = m_implementation;
             if (impl == AUTO) {
                 if ((S == 2*R) && m_numLayers <= 20) {
@@ -446,7 +446,7 @@ class nvWavenetInfer {
             volatile int *streamLock, *m_streamLock = NULL;
             bool destroy = false;
             cudaStream_t copyStream;
-            if (streaming) {
+            if (bufferSize > 0) {
                 cudaDeviceProp prop;
                 gpuErrChk(cudaGetDeviceProperties(&prop, 0));
                 assert(prop.asyncEngineCount > 0);
@@ -566,7 +566,7 @@ class nvWavenetInfer {
                 }
             }
 
-            if (streaming) {
+            if (bufferSize) {
                 if (result == true) {
                     int generated, copySize, offset;
                     while ((generated = *streamLock) <= num_samples && *num_buffered < num_samples) {

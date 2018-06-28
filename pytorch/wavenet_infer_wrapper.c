@@ -25,6 +25,7 @@
  *
  ******************************************************************************/
 #include <stdarg.h>
+#include <TH/TH.h>
 #include <THC/THC.h>
 #include "wavenet_infer.h"
 extern THCState *state;
@@ -32,6 +33,8 @@ extern THCState *state;
 int infer(THCudaIntTensor* samples_tensor,
           int sample_count,
           int batch_size,
+          int buffer_size,
+          THIntTensor* num_buffered_tensor,
           THCudaTensor* embed_prev_tensor,
           THCudaTensor* embed_curr_tensor,
           THCudaTensor* conv_out_tensor,
@@ -42,6 +45,7 @@ int infer(THCudaIntTensor* samples_tensor,
           int max_dilation,
           int implementation, ...) {
     int* samples = THCudaIntTensor_data(state, samples_tensor);
+    int* num_buffered = (buffer_size > 0) ? THIntTensor_data(num_buffered_tensor) : NULL;
       
     float* embedding_prev = THCudaTensor_data(state, embed_prev_tensor);
     float* embedding_curr = THCudaTensor_data(state, embed_curr_tensor);
@@ -71,6 +75,7 @@ int infer(THCudaIntTensor* samples_tensor,
 	  
     wavenet_infer(sample_count,
                   batch_size,
+                  buffer_size,
                   embedding_prev,
                   embedding_curr,
                   num_layers,
@@ -87,7 +92,8 @@ int infer(THCudaIntTensor* samples_tensor,
                   use_embed_tanh,
                   cond_input,
                   implementation,
-                  samples);
+                  samples,
+                  num_buffered);
 
     free(in_layer_weights_prev);
     free(in_layer_weights_curr);

@@ -32,6 +32,7 @@ extern "C" {
 // ------------------------------------------------
 void wavenet_infer(int sample_count,
                    int batch_size,
+                   int buffer_size,
                    float* embedding_prev,
                    float* embedding_curr,
                    int num_layers,
@@ -48,7 +49,8 @@ void wavenet_infer(int sample_count,
                    int use_embed_tanh,
                    float* cond_input,
                    int implementation,
-                   int* samples);
+                   int* samples,
+                   int* buffer_count);
 
 // --------------------------------------------------------
 // For checking the number of channels match current build

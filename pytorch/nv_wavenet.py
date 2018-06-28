@@ -53,16 +53,6 @@ def enum(**enums):
     return type('Enum', (), enums)
 Impl = enum(AUTO=0, SINGLE_BLOCK=1, DUAL_BLOCK=2, PERSISTENT=3)
 
-class NVWaveNetLauncher(Thread):
-    def __init__(self, wavenet, cond_input, implementation, samples=None):
-        self.wavenet = wavenet
-        self.cond_input = cond_input
-        self.implementation = implementation
-        self.samples = samples
-
-    def run(self):
-        self.samples = self.wavenet.infer(self.cond_input, self.implementation, self.samples)
-
 class NVWaveNet:
     def __init__(self, embedding_prev,
                        embedding_curr,
@@ -180,7 +170,7 @@ class NVWaveNet:
                                        skip_weights,
                                        skip_biases)
 
-    def infer(self, cond_input, implementation, samples=None):
+    def infer(self, cond_input, implementation, samples=None, buffer_size=0, num_buffered=None):
         # cond_input is channels x batch x num_layers x samples
         assert(cond_input.size()[0:3:2] == (2*self.R, self.num_layers)), \
         """Inputs are channels x batch x num_layers x samples.
@@ -190,11 +180,12 @@ class NVWaveNet:
         batch_size = cond_input.size(1)
         sample_count = cond_input.size(3)
         cond_input = column_major(cond_input)
-        if samples is None:
-            samples = torch.cuda.IntTensor(batch_size, sample_count)
+        samples = torch.cuda.IntTensor(batch_size, sample_count)
         nv_wavenet_ext.infer(samples,
                              sample_count,
                              batch_size,
+                             buffer_size,
+                             num_buffered,
                              self.embedding_prev,
                              self.embedding_curr,
                              self.conv_out,
@@ -206,3 +197,15 @@ class NVWaveNet:
                              implementation,
                              *self.layers)
         return samples
+
+    def infer_streaming(self, cond_input, implementation, samples, buffer_size):
+        num_buffered = torch.IntTensor(0)
+        launcher = Thread(target=self.infer, args=(self, cond_input, implementation, samples, buffer_size, num_buffered))
+        launcher.run()
+
+        prev, sample_count = 0, cond_input.size(3)
+        while prev < sample_count:
+            cur = num_buffered.item()
+            if cur > prev:
+                yield samples[:][prev:cur]
+                prev = cur
