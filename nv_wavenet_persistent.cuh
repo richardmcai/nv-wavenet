@@ -228,18 +228,20 @@ template <typename T_weight, typename T_data, int R, int BATCH_UNROLL>
 __device__ void nv_wavenet_persistent_cur(int row, int num_samples, volatile int* ySample, int layer, int num_layers, int batch_size, int maxDilation,
         T_weight* Wcur, T_data* B, T_data* L, T_data a_cur_sh[BATCH_UNROLL][2*R], volatile T_data* a_prev, volatile T_data* xt, int* yInPrev, int* yInCur, T_data* embedPrev, T_data* embedCur, bool tanhEmbed) {
     
-    const int WV = sizeof(T_weight)/sizeof(T_data);
+    const int WV = sizeof(T_weight)/sizeof(T_data); // either 1 or 2
     T_weight weights[R/WV];
     loadWeights<2*R,R>(weights,Wcur,layer,row);
     T_data accum[BATCH_UNROLL];
     T_data bias = B[layer*2*R+row];
     T_data a_prev_reg[BATCH_UNROLL];
+	T_data conditioning[BATCH_UNROLL];
     T_data xt_in[BATCH_UNROLL];
     for (int sample=0; sample<num_samples; sample++) {
         __syncthreads(); // Wait for initial sample lock
         volatile T_data* Xt = xt + (sample%(maxDilation+1))*(num_layers+1)*R*batch_size;
+
+        // TODO: write layer-stride loop here
         for (int batch_offset = 0; batch_offset < batch_size; batch_offset += BATCH_UNROLL) {
-            T_data conditioning[BATCH_UNROLL];
 #pragma unroll
             for (int b=0; b<BATCH_UNROLL; b++) {
                 conditioning[b] = L[sample*num_layers*batch_size*2*R + layer*batch_size*2*R + (batch_offset+b)*2*R + row];
@@ -271,7 +273,7 @@ __device__ void nv_wavenet_persistent_cur(int row, int num_samples, volatile int
             int xt_offset = layer*batch_size*R + batch_offset*R + row;
             // Do redundant loads in upper half to avoid branch in polling loop.
             if (row >= R) xt_offset -= R;
-            while (!valid) {
+            while (!valid) { // validation loop? waits until previous layer writes non neg zeros?
                 valid = true;
 #pragma unroll
                 for (int b=0; b<BATCH_UNROLL; b++) {
@@ -303,6 +305,8 @@ __device__ void nv_wavenet_persistent_cur(int row, int num_samples, volatile int
             namedBarrierSync(3,3*R); // a_cur_sh produced
             __syncthreads(); // a_cur_sh consumed
         }
+
+        // layer-stride loop ends here
     }
 }
 
@@ -440,7 +444,7 @@ __device__ void nv_wavenet_persistent_softmax(int block_id, int batch_size, int 
             int thread_id = threadIdx.x - NUM_THREADS;
             volatile T_data* Xt = xt + ((sample+1)%(maxDilation+1))*(num_layers+1)*R*batch_size;
             for (int l=0; l<num_layers; l++) {
-                for (int u=0; u<BATCH_UNROLL; u++) {
+                for (int u=0; u<BATCH_UNROLL; u++) { // resets Xt...
                     storeVolatile(Xt,l*batch_size*R + (col+u)*R + thread_id,-0.f);
                     storeVolatile(h,l*batch_size*R + (col+u)*R + thread_id,-0.f);
                     a_prev[l*batch_size*2*R + (col+u)*2*R + thread_id] = -0.f;
