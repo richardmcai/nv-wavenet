@@ -183,37 +183,87 @@ __device__ void nv_wavenet_persistent_GEMM(int thread_id, int num_samples, int i
    nv_wavenet_persistent_GEMM_MxK<T_weight, T_data, TILE_M, TILE_K, BATCH_UNROLL>(thread_id, num_samples, init_sample, num_samples_per_chunk, ySample, tile_id_k, tiles_k, batch_size, W + tile_offset_m, bias, act_in + tile_offset_k, act_out + tile_offset_m, accum_in + tile_offset_m, gemm_m, gemm_k, gemm_m, doRelu && (tile_id_k == tiles_k-1)); 
 }
 
-template <typename T_weight, typename T_data, int R, int BATCH_UNROLL>
-__device__ void nv_wavenet_persistent_prev(int row, int num_samples, int init_sample, int num_samples_per_chunk, volatile int* ySample, int layer, int num_layers, int batch_size, int maxDilation, T_weight* Wprev, T_data* a_prev, volatile T_data* xt) {
+/* GEMM Tile -- M threads, with K weights held in registers */
+template <typename T_weight, typename T_data, int M, int K, int N_UNROLL>
+__device__ void nv_wavenet_persistent_skip(int thread_id, int num_samples, int init_sample, int num_samples_per_chunk, volatile int* ySample, int resident_layer, int num_layers, int num_resident_layers, int batch_size, T_weight* W, T_data* B, T_data* act_in_base, T_data* act_out, volatile T_data* accum_in=NULL, int lda=M, int ldb=K, int ldc=M) {
+    int row = thread_id;
     const int WV = sizeof(T_weight)/sizeof(T_data);
-    T_weight weights[R/WV];
-    loadWeights<2*R,R>(weights,Wprev,layer,row);
-    T_data accum[BATCH_UNROLL];
-    __shared__ T_data xtmd_sh[BATCH_UNROLL][R];
+    T_weight weights[K/WV];
+    T_data accum[N_UNROLL];
+    T_data bias;
+    volatile T_data* act_in;
+    
+    __shared__ T_data act_in_sh[N_UNROLL][K];
+    T_data act_in_reg[N_UNROLL];
+    
+    if (thread_id < M) {
+        act_in = act_in_base + resident_layer*batch_size*K; //TODO: make this less abstraction violating
+        loadWeights<M,K>(weights,W,resident_layer,row,lda);
+        bias = B ? B[resident_layer*lda+row] : (T_data)0.f;
+        int prev_layer = resident_layer;
 
-    int dilation = 1;
-    for (int l=1; l<=layer; l++) {
-        dilation = dilation << 1;
-        if (dilation > maxDilation) dilation = 1;
-    }
-
-    if (row < 2*R) {
-        for (int sample=init_sample; sample<init_sample+num_samples_per_chunk; sample++) {
-            int sample_offset = (sample - dilation) % (maxDilation+1);
-            volatile T_data* xtmd = xt + sample_offset*(num_layers+1)*R*batch_size;
-            for (int batch_offset = 0; batch_offset < batch_size; batch_offset += BATCH_UNROLL) {
-                sampleLockAcquire<BATCH_UNROLL>(batch_offset,sample,ySample);
-                if (row < R) {
-#pragma unroll
-                    for (int b=0; b<BATCH_UNROLL; b++) {
-                        xtmd_sh[b][row] = (dilation <= sample) ? loadVolatile(xtmd,layer*batch_size*R + (batch_offset+b)*R + row) : (T_data)0.f;
-                    }
+        for (int sample=init_sample; sample < init_sample + num_samples_per_chunk; sample++) {
+            for (int layer = resident_layer; layer < num_layers; layer += num_resident_layers) {
+                if (layer != prev_layer) {
+                    act_in = act_in_base + layer*batch_size*K; //TODO: make this less abstraction violating
+                    loadWeights<M,K>(weights,W,layer,row,lda);
+                    bias = B ? B[layer*lda+row] : (T_data)0.f;
+                    prev_layer = layer;
                 }
-                __syncthreads();
-                GEMM<R,2,BATCH_UNROLL>(weights, xtmd_sh, accum);
+
+                for (int batch_offset = 0; batch_offset < batch_size; batch_offset += N_UNROLL) {
+                    // sampleLockacquire has a __syncthreads in it, so we don't need to worry about act_in_sh race
+                    sampleLockAcquire<N_UNROLL>(batch_offset, sample, ySample);
+                    if (row < K) {
+                        bool valid = false;
+                        while (!valid) {
+                            valid = true;
 #pragma unroll
-                for (int b=0; b<BATCH_UNROLL; b++) {
-                    a_prev[layer*batch_size*2*R + (batch_offset+b)*2*R + threadIdx.x] = accum[b]; 
+                            for (int b=0; b<N_UNROLL; b++) {
+                                act_in_reg[b] = loadVolatile(act_in,(batch_offset+b)*ldb + row);
+                            }
+#pragma unroll
+                            for (int b=0; b<N_UNROLL; b++) {
+                                valid &= !isNegativeZero(act_in_reg[b]);
+                            }
+                        }
+#pragma unroll
+                        for (int b=0; b<N_UNROLL; b++) {
+                            act_in_sh[b][row] = act_in_reg[b];
+                        }
+                    }
+                    __syncthreads();
+                    GEMM<K,2,N_UNROLL>(weights,act_in_sh,accum);
+                    if (accum_in) {
+                        if (layer > 0) {
+                            bool valid = false;
+                            T_data accum_in_reg[N_UNROLL];
+                            while (!valid) {
+                                valid = true;
+#pragma unroll
+                                for (int b=0; b<N_UNROLL; b++) {
+                                    accum_in_reg[b] = loadVolatile(accum_in,(layer-1)*batch_size*ldc + (batch_offset+b)*ldc + row);
+                                }
+#pragma unroll
+                                for (int b=0; b<N_UNROLL; b++) {
+                                    valid &= !isNegativeZero(accum_in_reg[b]);
+                                }
+                            }
+#pragma unroll
+                            for (int b=0; b<N_UNROLL; b++) {
+                                accum[b] += accum_in_reg[b];
+                            }
+                        }
+                    }
+#pragma unroll
+                    for (int b=0; b<N_UNROLL; b++) {
+                        accum[b] += bias;
+                        if (layer == num_layers-1) accum[b] = relu(accum[b]);
+                        act_out[layer*batch_size*ldc + (batch_offset+b)*ldc + row] = accum[b];
+                        if (accum_in)  {
+                            storeValidate(accum_in,layer*batch_size*ldc + (batch_offset+b)*ldc + row,accum[b]);
+                        }
+                    }
                 }
             }
         }
@@ -221,137 +271,211 @@ __device__ void nv_wavenet_persistent_prev(int row, int num_samples, int init_sa
 }
 
 template <typename T_weight, typename T_data, int R, int BATCH_UNROLL>
-__device__ void nv_wavenet_persistent_cur(int row, int num_samples, int init_sample, int num_samples_per_chunk, volatile int* ySample, int layer, int num_layers, int batch_size, int maxDilation, T_weight* Wcur, T_data* B, T_data* L, T_data a_cur_sh[BATCH_UNROLL][2*R], volatile T_data* a_prev, volatile T_data* xt, int* yInPrev, int* yInCur, T_data* embedPrev, T_data* embedCur, bool tanhEmbed) {
+__device__ void nv_wavenet_persistent_prev(int row, int num_samples, int init_sample, int num_samples_per_chunk, volatile int* ySample, int resident_layer, int num_layers, int num_resident_layers, int batch_size, int maxDilation, T_weight* Wprev, T_data* a_prev, volatile T_data* xt) {
     const int WV = sizeof(T_weight)/sizeof(T_data);
     T_weight weights[R/WV];
-    loadWeights<2*R,R>(weights,Wcur,layer,row);
     T_data accum[BATCH_UNROLL];
-    T_data bias = B[layer*2*R+row];
+    __shared__ T_data xtmd_sh[BATCH_UNROLL][R];
+
+    if (row < 2*R) {
+        loadWeights<2*R,R>(weights,Wprev,resident_layer,row);
+        int prev_layer = resident_layer;
+
+        for (int sample=init_sample; sample<init_sample+num_samples_per_chunk; sample++) {
+            for (int layer = resident_layer; layer < num_layers; layer += num_resident_layers) {
+                if (layer != prev_layer) {
+                    loadWeights<2*R,R>(weights,Wprev,layer,row);
+                    prev_layer = layer;
+                }
+
+                int dilation = 1;
+                for (int l=1; l<=layer; l++) {
+                    dilation = dilation << 1;
+                    if (dilation > maxDilation) dilation = 1;
+                }
+
+                int sample_offset = (sample - dilation) % (maxDilation+1);
+                volatile T_data* xtmd = xt + sample_offset*(num_layers+1)*R*batch_size;
+                for (int batch_offset = 0; batch_offset < batch_size; batch_offset += BATCH_UNROLL) {
+                    sampleLockAcquire<BATCH_UNROLL>(batch_offset,sample,ySample);
+                    if (row < R) {
+#pragma unroll
+                        for (int b=0; b<BATCH_UNROLL; b++) {
+                            xtmd_sh[b][row] = (dilation <= sample) ? loadVolatile(xtmd,layer*batch_size*R + (batch_offset+b)*R + row) : (T_data)0.f;
+                        }
+                    }
+                    __syncthreads();
+                    GEMM<R,2,BATCH_UNROLL>(weights, xtmd_sh, accum);
+#pragma unroll
+                    for (int b=0; b<BATCH_UNROLL; b++) {
+                        a_prev[layer*batch_size*2*R + (batch_offset+b)*2*R + threadIdx.x] = accum[b]; 
+                    a_prev[layer*batch_size*2*R + (batch_offset+b)*2*R + threadIdx.x] = accum[b]; 
+                        a_prev[layer*batch_size*2*R + (batch_offset+b)*2*R + threadIdx.x] = accum[b]; 
+                    }
+                }
+            }
+        }
+    }
+}
+
+template <typename T_weight, typename T_data, int R, int BATCH_UNROLL>
+__device__ void nv_wavenet_persistent_cur(int row, int num_samples, int init_sample, int num_samples_per_chunk, volatile int* ySample, int resident_layer, int num_layers, int num_resident_layers, int batch_size, int maxDilation, T_weight* Wcur, T_data* B, T_data* L, T_data a_cur_sh[BATCH_UNROLL][2*R], volatile T_data* a_prev, volatile T_data* xt, int* yInPrev, int* yInCur, T_data* embedPrev, T_data* embedCur, bool tanhEmbed) {
+    const int WV = sizeof(T_weight)/sizeof(T_data);
+    T_weight weights[R/WV];
+    T_data accum[BATCH_UNROLL];
+    T_data bias;
+	T_data conditioning[BATCH_UNROLL];
     T_data a_prev_reg[BATCH_UNROLL];
     T_data xt_in[BATCH_UNROLL];
+    
+    loadWeights<2*R,R>(weights,Wcur,resident_layer,row);
+    bias = B[resident_layer*2*R+row];
+    int prev_layer = resident_layer;
 
     for (int sample=init_sample; sample<init_sample+num_samples_per_chunk; sample++) {
         __syncthreads(); // Wait for initial sample lock
         volatile T_data* Xt = xt + (sample%(maxDilation+1))*(num_layers+1)*R*batch_size;
-        for (int batch_offset = 0; batch_offset < batch_size; batch_offset += BATCH_UNROLL) {
-            T_data conditioning[BATCH_UNROLL];
-#pragma unroll
-            for (int b=0; b<BATCH_UNROLL; b++) {
-                conditioning[b] = L[sample*num_layers*batch_size*2*R + layer*batch_size*2*R + (batch_offset+b)*2*R + row];
+        
+        for (int layer = resident_layer; layer < num_layers; layer += num_resident_layers) {
+            if (layer != prev_layer) {
+                loadWeights<2*R,R>(weights,Wcur,layer,row);
+                bias = B[layer*2*R+row];
+                prev_layer = layer;
             }
-            __shared__ T_data xt_sh[BATCH_UNROLL][R];
-            if (row < R) {
-                if (layer == 0) {
-                    // Embedding
-                    int yPrev[BATCH_UNROLL];
-                    int yCur[BATCH_UNROLL];
+
+            for (int batch_offset = 0; batch_offset < batch_size; batch_offset += BATCH_UNROLL) {
+#pragma unroll
+                for (int b=0; b<BATCH_UNROLL; b++) {
+                    conditioning[b] = L[sample*num_layers*batch_size*2*R + layer*batch_size*2*R + (batch_offset+b)*2*R + row];
+                }
+                __shared__ T_data xt_sh[BATCH_UNROLL][R];
+                if (row < R) {
+                    if (layer == 0) {
+                        // Embedding
+                        int yPrev[BATCH_UNROLL];
+                        int yCur[BATCH_UNROLL];
+#pragma unroll
+                        for (int b=0; b<BATCH_UNROLL; b++) {
+                            yPrev[b] = yInPrev[batch_offset+b];
+                            yCur[b] = yInCur[batch_offset+b];
+                            T_data embedded = embedPrev[yPrev[b]*R + row] + embedCur[yCur[b]*R + row];
+                            if (tanhEmbed) embedded = _tanh(embedded);
+                            xt_sh[b][row] = embedded;
+                            storeValidate(Xt, layer*batch_size*R + (batch_offset+b)*R + row, embedded);
+                        }
+                        // Make Xt visible before we write h, so that clears don't race ahead
+                        // This is only needed for the embedding write, since it's read by the same block -- 
+                        //  all other Xt writes get read by different blocks before they write h.  Since
+                        //  the clears depend on h, then we know that the Xt writes are globally visible.
+                        __threadfence();
+                    }
+                }
+                bool valid = false;
+                int a_prev_offset = layer*batch_size*2*R + batch_offset*2*R + row;
+                int xt_offset = layer*batch_size*R + batch_offset*R + row;
+                // Do redundant loads in upper half to avoid branch in polling loop.
+                if (row >= R) xt_offset -= R;
+                while (!valid) {
+                    valid = true;
 #pragma unroll
                     for (int b=0; b<BATCH_UNROLL; b++) {
-                        yPrev[b] = yInPrev[batch_offset+b];
-                        yCur[b] = yInCur[batch_offset+b];
-                        T_data embedded = embedPrev[yPrev[b]*R + row] + embedCur[yCur[b]*R + row];
-                        if (tanhEmbed) embedded = _tanh(embedded);
-                        xt_sh[b][row] = embedded;
-                        storeValidate(Xt, layer*batch_size*R + (batch_offset+b)*R + row, embedded);
+                        a_prev_reg[b] = loadVolatile(a_prev,a_prev_offset+b*2*R);
+                        xt_in[b] = loadVolatile(Xt,xt_offset+b*R);
                     }
-                    // Make Xt visible before we write h, so that clears don't race ahead
-                    // This is only needed for the embedding write, since it's read by the same block -- 
-                    //  all other Xt writes get read by different blocks before they write h.  Since
-                    //  the clears depend on h, then we know that the Xt writes are globally visible.
-                    __threadfence();
-                }
-            }
-            bool valid = false;
-            int a_prev_offset = layer*batch_size*2*R + batch_offset*2*R + row;
-            int xt_offset = layer*batch_size*R + batch_offset*R + row;
-            // Do redundant loads in upper half to avoid branch in polling loop.
-            if (row >= R) xt_offset -= R;
-            while (!valid) {
-                valid = true;
 #pragma unroll
-                for (int b=0; b<BATCH_UNROLL; b++) {
-                    a_prev_reg[b] = loadVolatile(a_prev,a_prev_offset+b*2*R);
-                    xt_in[b] = loadVolatile(Xt,xt_offset+b*R);
+                    for (int b=0; b<BATCH_UNROLL; b++) {
+                        valid &= !isNegativeZero(a_prev_reg[b]);
+                        valid &= !isNegativeZero(xt_in[b]);
+                    }
                 }
+                if (row < R) {
 #pragma unroll
-                for (int b=0; b<BATCH_UNROLL; b++) {
-                    valid &= !isNegativeZero(a_prev_reg[b]);
-                    valid &= !isNegativeZero(xt_in[b]);
+                    for (int b=0; b<BATCH_UNROLL; b++) {
+                        xt_sh[b][row] = xt_in[b];
+                    }
                 }
-            }
-            if (row < R) {
+                namedBarrierSync(1,2*R);
+                GEMM<R,2,BATCH_UNROLL>(weights,xt_sh,accum);
 #pragma unroll
-                for (int b=0; b<BATCH_UNROLL; b++) {
-                    xt_sh[b][row] = xt_in[b];
+                for (int b=0; b<BATCH_UNROLL; b++) { 
+                    accum[b] += a_prev_reg[b];
+                    accum[b] += bias; 
+                    accum[b] += conditioning[b];
+                    T_data val = (row < R) ? _tanh(accum[b]) : sigmoid(accum[b]);
+                    a_cur_sh[b][row] = val;
                 }
+                namedBarrierSync(3,3*R); // a_cur_sh produced
+                __syncthreads(); // a_cur_sh consumed
             }
-            namedBarrierSync(1,2*R);
-            GEMM<R,2,BATCH_UNROLL>(weights,xt_sh,accum);
-#pragma unroll
-            for (int b=0; b<BATCH_UNROLL; b++) { 
-                accum[b] += a_prev_reg[b];
-                accum[b] += bias; 
-                accum[b] += conditioning[b];
-                T_data val = (row < R) ? _tanh(accum[b]) : sigmoid(accum[b]);
-                a_cur_sh[b][row] = val;
-            }
-            namedBarrierSync(3,3*R); // a_cur_sh produced
-            __syncthreads(); // a_cur_sh consumed
         }
     }
 }
 
 template <typename T_weight, typename T_data, int R, int BATCH_UNROLL>
-__device__ void nv_wavenet_persistent_res(int row, int num_samples, int init_sample, int num_samples_per_chunk, volatile int* ySample, int layer, int num_layers, int batch_size, int maxDilation, T_weight* Wres, T_data* Bres, T_data a_cur_sh[BATCH_UNROLL][2*R], T_data* xt, T_data* h, T_data* xtOut, bool dumpActivations) {
+__device__ void nv_wavenet_persistent_res(int row, int num_samples, int init_sample, int num_samples_per_chunk, volatile int* ySample, int resident_layer, int num_layers, int num_resident_layers, int batch_size, int maxDilation, T_weight* Wres, T_data* Bres, T_data a_cur_sh[BATCH_UNROLL][2*R], T_data* xt, T_data* h, T_data* xtOut, bool dumpActivations) {
     const int WV = sizeof(T_weight)/sizeof(T_data);
     T_weight weights[R/WV];
-    T_data bias = Bres[layer*R+row];
+    T_data bias;
     T_data accum[BATCH_UNROLL];
     __shared__ T_data h_sh[BATCH_UNROLL][R];
-    loadWeights<R,R>(weights,Wres,layer,row);
+
+    loadWeights<R,R>(weights,Wres,resident_layer,row);
+    bias = Bres[resident_layer*R+row];
+    int prev_layer = resident_layer;
+
     for (int sample=init_sample; sample<init_sample+num_samples_per_chunk; sample++) {
         __syncthreads(); // Wait for initial sample lock
-        for (int batch_offset = 0; batch_offset < batch_size; batch_offset += BATCH_UNROLL) {
-            namedBarrierSync(3,3*R); // a_cur_sh produced, h_sh consumed
-#pragma unroll
-            for (int b=0; b<BATCH_UNROLL; b++) {
-                T_data val = a_cur_sh[b][row] * a_cur_sh[b][row + R];
-                h_sh[b][row] = val;
-                h[layer*batch_size*R + (batch_offset+b)*R + row] = validate(val);
+        for (int layer = resident_layer; layer < num_layers; layer += num_resident_layers) {
+            if (layer != prev_layer) {
+                loadWeights<R,R>(weights,Wres,layer,row);
+                bias = Bres[layer*R+row];
+                prev_layer = layer;
             }
-            __syncthreads(); // a_cur_sh consumed, h_sh produced
-            GEMM<R,2,BATCH_UNROLL>(weights,h_sh,accum);
-            T_data* Xt = xt + (sample%(maxDilation+1))*(num_layers+1)*R*batch_size;
+
+            for (int batch_offset = 0; batch_offset < batch_size; batch_offset += BATCH_UNROLL) {
+                namedBarrierSync(3,3*R); // a_cur_sh produced, h_sh consumed
 #pragma unroll
-            for (int b=0; b<BATCH_UNROLL; b++) { 
-                accum[b] += bias; 
-                accum[b] += Xt[layer*batch_size*R + (batch_offset+b)*R + row];
-                Xt[(layer+1)*batch_size*R + (batch_offset+b)*R + row] = accum[b];
-                if (dumpActivations) xtOut[layer*batch_size*R + (batch_offset+b)*R + row] = accum[b];
+                for (int b=0; b<BATCH_UNROLL; b++) {
+                    T_data val = a_cur_sh[b][row] * a_cur_sh[b][row + R];
+                    h_sh[b][row] = val;
+                    h[layer*batch_size*R + (batch_offset+b)*R + row] = validate(val);
+                }
+                __syncthreads(); // a_cur_sh consumed, h_sh produced
+                GEMM<R,2,BATCH_UNROLL>(weights,h_sh,accum);
+                T_data* Xt = xt + (sample%(maxDilation+1))*(num_layers+1)*R*batch_size;
+#pragma unroll
+                for (int b=0; b<BATCH_UNROLL; b++) { 
+                    accum[b] += bias; 
+                    accum[b] += Xt[layer*batch_size*R + (batch_offset+b)*R + row];
+                    Xt[(layer+1)*batch_size*R + (batch_offset+b)*R + row] = accum[b];
+                    if (dumpActivations) xtOut[layer*batch_size*R + (batch_offset+b)*R + row] = accum[b];
+                }
             }
         }
     }
 }
 
 template <typename T_weight, typename T_data, int R, int BATCH_UNROLL>
-__device__ void nv_wavenet_persistent_cur_res(int thread_id, int num_samples, int init_sample, int num_samples_per_chunk, volatile int* ySample, int layer, int num_layers, int batch_size, int maxDilation, T_weight* Wcur, T_data* B, T_data* L, T_weight* Wres, T_data* Bres, T_data* a_prev, T_data* xt, T_data* h, T_data* xtOut, bool dumpActivations, int* yInPrev, int* yInCur, T_data* embedPrev, T_data* embedCur, bool tanhEmbed) {
+__device__ void nv_wavenet_persistent_cur_res(int thread_id, int num_samples, int init_sample, int num_samples_per_chunk, volatile int* ySample, int resident_layer, int num_layers, int num_resident_layers, int batch_size, int maxDilation, T_weight* Wcur, T_data* B, T_data* L, T_weight* Wres, T_data* Bres, T_data* a_prev, T_data* xt, T_data* h, T_data* xtOut, bool dumpActivations, int* yInPrev, int* yInCur, T_data* embedPrev, T_data* embedCur, bool tanhEmbed) {
     __shared__ T_data a_cur_sh[BATCH_UNROLL][2*R];
     if (thread_id < R) {
         for (int sample=init_sample; sample<init_sample+num_samples_per_chunk; sample++) {
             sampleLockAcquire<BATCH_UNROLL>(0,sample,ySample);
-            for (int batch_offset = 0; batch_offset < batch_size; batch_offset += BATCH_UNROLL) {
-                if (batch_offset+BATCH_UNROLL<batch_size) sampleLockAcquire<BATCH_UNROLL>(batch_offset+BATCH_UNROLL,sample,ySample);
-                else __syncthreads();
+            for (int layer = resident_layer; layer < num_layers; layer += num_resident_layers) {
+                for (int batch_offset = 0; batch_offset < batch_size; batch_offset += BATCH_UNROLL) {
+                    if (layer == resident_layer && batch_offset+BATCH_UNROLL<batch_size) sampleLockAcquire<BATCH_UNROLL>(batch_offset+BATCH_UNROLL,sample,ySample);
+                    else __syncthreads();
+                }
             }
         }
     }
     else if (thread_id < 3*R) {
         int row = thread_id - R;
-        nv_wavenet_persistent_cur<T_weight, T_data, R, BATCH_UNROLL>(row, num_samples, init_sample, num_samples_per_chunk, ySample, layer, num_layers, batch_size, maxDilation, Wcur, B, L, a_cur_sh, a_prev, xt, yInPrev, yInCur, embedPrev, embedCur, tanhEmbed); 
+        nv_wavenet_persistent_cur<T_weight, T_data, R, BATCH_UNROLL>(row, num_samples, init_sample, num_samples_per_chunk, ySample, resident_layer, num_layers, num_resident_layers, batch_size, maxDilation, Wcur, B, L, a_cur_sh, a_prev, xt, yInPrev, yInCur, embedPrev, embedCur, tanhEmbed); 
     }
     else if (thread_id < 4*R) {
         int row = thread_id - 3*R;
-        nv_wavenet_persistent_res<T_weight, T_data, R, BATCH_UNROLL>(row, num_samples, init_sample, num_samples_per_chunk, ySample, layer, num_layers, batch_size, maxDilation, Wres, Bres, a_cur_sh, xt, h, xtOut, dumpActivations);
+        nv_wavenet_persistent_res<T_weight, T_data, R, BATCH_UNROLL>(row, num_samples, init_sample, num_samples_per_chunk, ySample, resident_layer, num_layers, num_resident_layers, batch_size, maxDilation, Wres, Bres, a_cur_sh, xt, h, xtOut, dumpActivations);
     }
 }
 
@@ -463,13 +587,13 @@ __device__ void nv_wavenet_persistent_softmax(int block_id, int batch_size, int 
 
 template <bool PERSISTENT, typename T_weight, typename T_data, int R, int S, int A, int BATCH_UNROLL>
 __global__ void nv_wavenet_persistent(nv_wavenet_params<T_weight, T_data> params) {
-    int prev_blocks = params.num_layers;
-    int cur_blocks = params.num_layers;
+    int prev_blocks = params.num_resident_layers;
+    int cur_blocks = params.num_resident_layers;
     const int S_TILE = S < 4*R ? S : 4*R;
     const int A_TILE = A < 4*R ? A : 4*R;
     int s_tiles = S / S_TILE;
     int a_tiles = A / A_TILE;
-    int skip_blocks = params.num_layers * s_tiles;
+    int skip_blocks = params.num_resident_layers * s_tiles;
     int Zs_blocks = a_tiles * (S/R);
     int Za_blocks = a_tiles * (A/R);
     int thread_id = threadIdx.x;
@@ -482,21 +606,21 @@ __global__ void nv_wavenet_persistent(nv_wavenet_params<T_weight, T_data> params
 
     if (block_idx < prev_blocks) {
         // Prev
-        int layer = block_idx;
-        nv_wavenet_persistent_prev<T_weight, T_data, R, BATCH_UNROLL>(thread_id, params.num_samples, init_sample, num_samples_per_block, params.ySample, layer, params.num_layers, params.batch_size, params.maxDilation, params.Wprev, params.a_prev, params.xt);
+        int resident_layer = block_idx;
+        nv_wavenet_persistent_prev<T_weight, T_data, R, BATCH_UNROLL>(thread_id, params.num_samples, init_sample, num_samples_per_block, params.ySample, resident_layer, params.num_layers, params.num_resident_layers, params.batch_size, params.maxDilation, params.Wprev, params.a_prev, params.xt);
     }
     else if (block_idx < prev_blocks + cur_blocks) {
         // Cur
-        int layer = block_idx - prev_blocks;
-        nv_wavenet_persistent_cur_res<T_weight, T_data, R, BATCH_UNROLL>(thread_id, params.num_samples, init_sample, num_samples_per_block, params.ySample, layer, params.num_layers, params.batch_size, params.maxDilation, params.Wcur, params.B, params.L, params.Wres, params.Bres, params.a_prev, params.xt, params.h, params.xtOut, params.dumpActivations, params.yInPrev, params.yInCur, params.embedPrev, params.embedCur, params.tanhEmbed);
+        int resident_layer = block_idx - prev_blocks;
+        nv_wavenet_persistent_cur_res<T_weight, T_data, R, BATCH_UNROLL>(thread_id, params.num_samples, init_sample, num_samples_per_block, params.ySample, resident_layer, params.num_layers, params.num_resident_layers, params.batch_size, params.maxDilation, params.Wcur, params.B, params.L, params.Wres, params.Bres, params.a_prev, params.xt, params.h, params.xtOut, params.dumpActivations, params.yInPrev, params.yInCur, params.embedPrev, params.embedCur, params.tanhEmbed);
     }
     else if (block_idx < prev_blocks + cur_blocks + skip_blocks) {
         // Skip
         int block_id = block_idx - prev_blocks - cur_blocks;
-        int layer = block_id*s_tiles;
+        int resident_layer = block_id/s_tiles;
         int tile = block_id%s_tiles;
         int tile_offset = tile*S_TILE;
-        nv_wavenet_persistent_GEMM_MxK<T_weight, T_data, S_TILE, R, BATCH_UNROLL>(thread_id, params.num_samples, init_sample, num_samples_per_block, params.ySample,layer, params.num_layers, params.batch_size, params.Wskip + tile_offset, params.Bskip + tile_offset, params.h + layer*params.batch_size*R, params.skip_out + tile_offset, params.skip_out + tile_offset, S, R, S, layer==params.num_layers-1);
+        nv_wavenet_persistent_skip<T_weight, T_data, S_TILE, R, BATCH_UNROLL>(thread_id, params.num_samples, init_sample, num_samples_per_block, params.ySample, resident_layer, params.num_layers, params.num_resident_layers, params.batch_size, params.Wskip + tile_offset, params.Bskip + tile_offset, params.h, params.skip_out + tile_offset, params.skip_out + tile_offset, S, R, S);
     }
     // AxS
     else if (block_idx < prev_blocks + cur_blocks + skip_blocks + Zs_blocks) {
@@ -521,7 +645,7 @@ __global__ void nv_wavenet_persistent(nv_wavenet_params<T_weight, T_data> params
 template <bool PERSISTENT, typename T_weight, typename T_data, int R, int S, int A, int BATCH_UNROLL>
 struct launch_manyblock {
     bool operator() (nv_wavenet_params<T_weight, T_data> params, cudaStream_t stream) {
-        int prev_blocks = params.num_layers;
+        int prev_blocks = params.num_layers; //TODO: combine 2 layers per block, since 4R blocks means half of prev threads will be idle, i.e. wasted occupancy
         int cur_blocks = params.num_layers;
         assert (A%R == 0);
         assert (S%R == 0);
@@ -542,11 +666,25 @@ struct launch_manyblock {
         dim3 block(4*R);
         if (S > 4*R) block.x = S;
         int occ = getOccupancy(0, block.x*block.y*block.z,(void*)nv_wavenet_persistent<PERSISTENT,T_weight, T_data, R, S, A, BATCH_UNROLL>);
-        printf("%d blocks, %d blocks per SM\n", grid.x, occ);
         assert(occ>0);
-
+        if (PERSISTENT) {
+            int num_SM;
+            gpuErrChk ( cudaDeviceGetAttribute(&num_SM, cudaDevAttrMultiProcessorCount, 0) );
+            int num_resident_layers = params.num_layers;
+            while (grid.x > num_SM * occ) {
+                num_resident_layers--;
+                grid.x -= 2 + s_tiles;
+            }
+            assert(num_resident_layers > 0);
+            params.num_resident_layers = num_resident_layers;
+        } else {
+            params.num_resident_layers = params.num_layers;
+        }
+        
         //gpuErrChk(cudaMemset((void*)params.hSample,0,params.num_layers*params.batch_size*sizeof(int)));
         if(!params.init_sample) {
+            printf("%d resident layers, %d blocks, %d blocks per SM\n", params.num_resident_layers, grid.x, occ);
+            
             gpuErrChk(cudaMemset((void*)params.ySample,0,params.batch_size*sizeof(int)));
             initializeActivations<T_data,R><<<params.num_layers*params.batch_size,R,0,stream>>>(params.xt, params.h, params.a_prev, params.num_layers, params.batch_size);
             initializeActivationsGeneric<T_data><<<(params.maxDilation+1)*(params.num_layers+1)*params.batch_size,R,0,stream>>>(params.xt);

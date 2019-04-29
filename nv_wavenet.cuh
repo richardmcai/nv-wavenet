@@ -45,6 +45,7 @@ struct nv_wavenet_params {
     int init_sample;
     int batch_size;
     int num_layers;
+    int num_resident_layers;
     int* yInPrev;
     int* yInCur;
     T_data* embedPrev;
