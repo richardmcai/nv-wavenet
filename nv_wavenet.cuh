@@ -233,6 +233,7 @@ class nvWavenetInfer {
         Implementation m_implementation;
 
         int m_numLayers;
+        int m_numResidentLayers;
         int m_maxBatch; 
 
         int* m_yOut;
@@ -309,7 +310,7 @@ class nvWavenetInfer {
         }
 
     public:
-        nvWavenetInfer (int numLayers, int maxDilation, int batchSize, int numSamples, int impl=0, bool tanhEmbed=true) : m_numLayers(numLayers), m_maxBatch(batchSize), m_maxSamples(numSamples), m_implementation((nvWavenetInfer::Implementation)impl), m_tanhEmbed(tanhEmbed) {
+        nvWavenetInfer (int numLayers, int numResidentLayers, int maxDilation, int batchSize, int numSamples, int impl=0, bool tanhEmbed=true) : m_numLayers(numLayers), m_numResidentLayers(numResidentLayers), m_maxBatch(batchSize), m_maxSamples(numSamples), m_implementation((nvWavenetInfer::Implementation)impl), m_tanhEmbed(tanhEmbed) {
 
             m_num_samples_per_chunk = 0;
             m_maxDilation = maxDilation;
@@ -518,6 +519,7 @@ class nvWavenetInfer {
             params.num_samples_per_chunk = m_num_samples_per_chunk ? m_num_samples_per_chunk : num_samples;
             params.batch_size = batch_size;
             params.num_layers = m_numLayers;
+            params.num_resident_layers = m_numResidentLayers;
             params.yInPrev = m_yInPrev;
             params.yInCur = m_yInCur;
             params.embedPrev = m_embedPrev;

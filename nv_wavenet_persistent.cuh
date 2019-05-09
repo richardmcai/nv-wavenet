@@ -671,7 +671,7 @@ struct launch_manyblock {
             int num_SM;
             gpuErrChk ( cudaDeviceGetAttribute(&num_SM, cudaDevAttrMultiProcessorCount, 0) );
             int num_resident_layers = params.num_layers;
-            while (grid.x > num_SM * occ) {
+            while (grid.x > num_SM * occ || params.num_resident_layers < num_resident_layers) {
                 num_resident_layers--;
                 grid.x -= 2 + s_tiles;
             }

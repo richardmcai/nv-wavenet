@@ -32,7 +32,7 @@
 #include <unistd.h>
 
 template <typename T_weight, typename T_data, int R, int S, int A>
-float getSampleRateT(int num_layers, int max_dilation, int batch_size, int batch_size_per_block, int num_samples, int num_samples_per_chunk, int mode) {
+float getSampleRateT(int num_layers, int num_resident_layers, int max_dilation, int batch_size, int batch_size_per_block, int num_samples, int num_samples_per_chunk, int mode) {
 
     // Set up initial activations
 
@@ -56,7 +56,7 @@ float getSampleRateT(int num_layers, int max_dilation, int batch_size, int batch
         randomWeights[i] = -0.5 + static_cast <float> (rand()) / static_cast <float> (RAND_MAX); 
     }
 
-    nvWavenetInfer<T_weight, T_data, R, S, A> infer(num_layers, max_dilation, batch_size, num_samples, mode);
+    nvWavenetInfer<T_weight, T_data, R, S, A> infer(num_layers, num_resident_layers, max_dilation, batch_size, num_samples, mode);
     for (int l=0; l<num_layers; l++) {
         infer.setLayerWeights(l, randomWeights, randomWeights, randomWeights, randomWeights, randomWeights, randomWeights, randomWeights);
     }
@@ -88,32 +88,32 @@ float getSampleRateT(int num_layers, int max_dilation, int batch_size, int batch
 
 }
 
-float getSampleRate(int precision, int r, int s, int a, int num_layers, int max_dilation, int batch_size, int batch_size_per_block, int num_samples, int num_samples_per_chunk, int mode) {
+float getSampleRate(int precision, int r, int s, int a, int num_layers, int num_resident_layers, int max_dilation, int batch_size, int batch_size_per_block, int num_samples, int num_samples_per_chunk, int mode) {
     float sample_rate;
     if (r == 32) {
         assert(s==128);
         assert(a==256);
         if (precision == 16) {
-	    sample_rate = getSampleRateT<half2,half,32,128,256>(num_layers, max_dilation, batch_size, batch_size_per_block, num_samples, num_samples_per_chunk, mode);
+	    sample_rate = getSampleRateT<half2,half,32,128,256>(num_layers, num_resident_layers, max_dilation, batch_size, batch_size_per_block, num_samples, num_samples_per_chunk, mode);
         }
         else {
             assert(precision==32);
-	    sample_rate = getSampleRateT<float,float,32,128,256>(num_layers, max_dilation, batch_size, batch_size_per_block, num_samples, num_samples_per_chunk, mode);
+	    sample_rate = getSampleRateT<float,float,32,128,256>(num_layers, num_resident_layers, max_dilation, batch_size, batch_size_per_block, num_samples, num_samples_per_chunk, mode);
         }
     }
     else if (r == 64) {
         if (precision == 16) {
             if (s==128) {
                 if (a==256) 
-                  sample_rate = getSampleRateT<half2,half,64,128,256>(num_layers, max_dilation, batch_size, batch_size_per_block, num_samples, num_samples_per_chunk, mode);
+                  sample_rate = getSampleRateT<half2,half,64,128,256>(num_layers, num_resident_layers, max_dilation, batch_size, batch_size_per_block, num_samples, num_samples_per_chunk, mode);
 		else {
                   assert (a == 512);
-                  sample_rate = getSampleRateT<half2,half,64,128,512>(num_layers, max_dilation, batch_size, batch_size_per_block, num_samples, num_samples_per_chunk, mode);
+                  sample_rate = getSampleRateT<half2,half,64,128,512>(num_layers, num_resident_layers, max_dilation, batch_size, batch_size_per_block, num_samples, num_samples_per_chunk, mode);
 		} 
 	    }
             else if (s==256) {
                 assert (a == 256);
-                sample_rate = getSampleRateT<half2,half,64,256,256>(num_layers, max_dilation, batch_size, batch_size_per_block, num_samples, num_samples_per_chunk, mode);
+                sample_rate = getSampleRateT<half2,half,64,256,256>(num_layers, num_resident_layers, max_dilation, batch_size, batch_size_per_block, num_samples, num_samples_per_chunk, mode);
 	    }
             else
                 assert(false);
@@ -122,15 +122,15 @@ float getSampleRate(int precision, int r, int s, int a, int num_layers, int max_
             assert(precision==32);
             if (s==128) {
                 if (a==256) 
-                  sample_rate = getSampleRateT<float,float,64,128,256>(num_layers, max_dilation, batch_size, batch_size_per_block, num_samples, num_samples_per_chunk, mode);
+                  sample_rate = getSampleRateT<float,float,64,128,256>(num_layers, num_resident_layers, max_dilation, batch_size, batch_size_per_block, num_samples, num_samples_per_chunk, mode);
 		else {
                   assert (a == 512);
-                  sample_rate = getSampleRateT<float,float,64,128,512>(num_layers, max_dilation, batch_size, batch_size_per_block, num_samples, num_samples_per_chunk, mode);
+                  sample_rate = getSampleRateT<float,float,64,128,512>(num_layers, num_resident_layers, max_dilation, batch_size, batch_size_per_block, num_samples, num_samples_per_chunk, mode);
 		} 
             }
             else if (s==256) {
                 assert (a == 256);
-                sample_rate = getSampleRateT<float,float,64,256,256>(num_layers, max_dilation, batch_size, batch_size_per_block, num_samples, num_samples_per_chunk, mode);
+                sample_rate = getSampleRateT<float,float,64,256,256>(num_layers, num_resident_layers, max_dilation, batch_size, batch_size_per_block, num_samples, num_samples_per_chunk, mode);
             }
             else
                 assert(false);
@@ -139,18 +139,18 @@ float getSampleRate(int precision, int r, int s, int a, int num_layers, int max_
         assert (s == 256);
         if (precision == 16) {
             if (a == 256) {
-                sample_rate = getSampleRateT<half2,half,128,256,256>(num_layers, max_dilation, batch_size, batch_size_per_block, num_samples, num_samples_per_chunk, mode);
+                sample_rate = getSampleRateT<half2,half,128,256,256>(num_layers, num_resident_layers, max_dilation, batch_size, batch_size_per_block, num_samples, num_samples_per_chunk, mode);
             } else {
                 assert (a==1024);
-                sample_rate = getSampleRateT<half2,half,128,256,1024>(num_layers, max_dilation, batch_size, batch_size_per_block, num_samples, num_samples_per_chunk, mode);
+                sample_rate = getSampleRateT<half2,half,128,256,1024>(num_layers, num_resident_layers, max_dilation, batch_size, batch_size_per_block, num_samples, num_samples_per_chunk, mode);
             }
         } else {
             assert (precision == 32);
             if (a == 256) {
-                sample_rate = getSampleRateT<float,float,128,256,256>(num_layers, max_dilation, batch_size, batch_size_per_block, num_samples, num_samples_per_chunk, mode);
+                sample_rate = getSampleRateT<float,float,128,256,256>(num_layers, num_resident_layers, max_dilation, batch_size, batch_size_per_block, num_samples, num_samples_per_chunk, mode);
             } else {
                 assert(a==1024);
-                sample_rate = getSampleRateT<float,float,128,256,1024>(num_layers, max_dilation, batch_size, batch_size_per_block, num_samples, num_samples_per_chunk, mode);
+                sample_rate = getSampleRateT<float,float,128,256,1024>(num_layers, num_resident_layers, max_dilation, batch_size, batch_size_per_block, num_samples, num_samples_per_chunk, mode);
             }
         }
     } else  {
@@ -158,10 +158,10 @@ float getSampleRate(int precision, int r, int s, int a, int num_layers, int max_
         assert (s == 256);
         assert (a == 256);
         if (precision == 16) {
-            sample_rate = getSampleRateT<half2,half,256,256,256>(num_layers, max_dilation, batch_size, batch_size_per_block, num_samples, num_samples_per_chunk, mode);
+            sample_rate = getSampleRateT<half2,half,256,256,256>(num_layers, num_resident_layers, max_dilation, batch_size, batch_size_per_block, num_samples, num_samples_per_chunk, mode);
         } else {
             assert (precision == 32);
-            sample_rate = getSampleRateT<float,float,256,256,256>(num_layers, max_dilation, batch_size, batch_size_per_block, num_samples, num_samples_per_chunk, mode);
+            sample_rate = getSampleRateT<float,float,256,256,256>(num_layers, num_resident_layers, max_dilation, batch_size, batch_size_per_block, num_samples, num_samples_per_chunk, mode);
         }
     }
     return sample_rate;
@@ -187,6 +187,7 @@ int main(int argc, char* argv[]) {
 
 
     int num_layers = 20;
+    int num_resident_layers = 20;
     int r = 64;
     int s = 128;
     int a = 256;
@@ -200,10 +201,13 @@ int main(int argc, char* argv[]) {
     int device = 0;
 
     int c;
-    while ((c = getopt (argc, argv, "l:r:s:a:b:n:c:d:m:p:t:f:")) != -1) {
+    while ((c = getopt (argc, argv, "l:x:r:s:a:b:n:c:d:m:p:t:f:")) != -1) {
         switch (c) {
             case 'l':
                 num_layers = atoi(optarg);
+                break;
+            case 'x':
+                num_resident_layers = atoi(optarg);
                 break;
             case 'r': 
                 r = atoi(optarg);
@@ -276,6 +280,6 @@ int main(int argc, char* argv[]) {
     srand(1);
     cudaSetDevice(device);
 
-    float sample_rate = getSampleRate(precision, r, s, a, num_layers, max_dilation, batch_size, batch_size_per_block, num_samples, num_samples_per_chunk, mode);
+    float sample_rate = getSampleRate(precision, r, s, a, num_layers, num_resident_layers, max_dilation, batch_size, batch_size_per_block, num_samples, num_samples_per_chunk, mode);
     printf("Sample rate: %f kHz\n", sample_rate);
 }
